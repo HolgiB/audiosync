@@ -17,16 +17,19 @@ The first audio track from the second file is added as the English track.
 ## What V2 does
 
 1. Checks the video stream parameters.
-2. Decodes four sample frames from both files and compares their FFmpeg
-   `framemd5` hashes. This compares decoded pixels, so different container
-   metadata or packetization does not matter.
+2. Decodes sample frames from both files and compares downscaled grayscale
+   structural signatures at several positions. Recordings of the same release
+   can start at slightly different times (different channel padding), so a
+   constant video offset is first estimated and applied before comparing.
 3. Extracts both first audio tracks as low-rate mono PCM solely for analysis.
 4. Determines the relative audio offset at five positions throughout the movie.
 5. Uses the median offset and rejects measurements that disagree by more than
    150 ms.
-6. Positive offset: delays the second audio with `adelay`.
-7. Negative offset: trims the leading part of the second audio with `atrim` and
-   resets its PTS with `asetpts=PTS-STARTPTS`.
+6. Positive offset: trims the leading part of the second audio with `atrim` and
+   resets its PTS with `asetpts=PTS-STARTPTS` (the second audio starts later,
+   so its leading silence is cut and it is advanced).
+7. Negative offset: delays the second audio with `adelay` (the second audio
+   starts earlier, so it is pushed back to align with the reference).
 8. Muxes the reference video + both audio tracks into the final MKV.
 
 ## Important
@@ -57,8 +60,8 @@ same:
 
 ## Offset meaning
 
-    +1.250s  English starts 1.25 seconds later -> delay English
-    -1.250s  English starts 1.25 seconds earlier -> trim first 1.25 seconds
+    +1.250s  English starts 1.25 seconds later -> cut first 1.25 s (advance)
+    -1.250s  English starts 1.25 seconds earlier -> delay English by 1.25 s
 
 The tool deliberately aborts when the offset changes substantially during the
 movie. That usually indicates different cuts, PAL/NTSC speed differences,
