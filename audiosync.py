@@ -77,7 +77,7 @@ def corr(a,b):
     d = np.sqrt((a*a).sum()*(b*b).sum())
     return float(np.dot(a,b)/d) if d > 0 else 0.0
 
-def verify_video_identity(a,b,ia,ib,samples=4):
+def verify_video_identity(a,b,ia,ib,samples=4,max_offset=180.0):
     pa,pb = video_params(ia),video_params(ib)
     print("\nVideo identity check:", file=sys.stderr)
     for k in pa:
@@ -91,10 +91,38 @@ def verify_video_identity(a,b,ia,ib,samples=4):
         return False
 
     positions = np.linspace(common*.15, common*.85, samples)
+
+    # Recordings of the same release can start at slightly different times
+    # (different leading padding on the channel), so the video streams may be
+    # offset by a constant amount. Estimate that offset before comparing.
+    # Fine search first; escalate to a coarse wide sweep only if needed.
+    def best_alignment(t):
+        for rng, step in ((3.0,0.25),(max_offset,2.0)):
+            sa = frame_sig(a,float(t))
+            if sa is None: return None
+            bd,bc = 0.0,0.0
+            for dt in np.arange(-rng,rng+step,step):
+                sb = frame_sig(b,float(t+dt))
+                c = corr(sa,sb) if sb is not None else 0.0
+                if c > bc: bd,bc = dt,c
+            if bc >= 0.85:
+                return bd,bc
+        return None
+
+    aligned = [r for r in (best_alignment(float(t)) for t in positions)
+               if r is not None]
+    if not aligned:
+        print("  RESULT: FAIL (no position aligns at any offset)",
+              file=sys.stderr)
+        return False
+    offset = float(np.median([d for d,_ in aligned]))
+    print(f"  estimated video offset (second-ref): {offset:+.2f}s",
+          file=sys.stderr)
+
     matches = 0
     for t in positions:
         sa = frame_sig(a,float(t))
-        sb = frame_sig(b,float(t))
+        sb = frame_sig(b,float(t+offset))
         c = corr(sa,sb) if sa is not None and sb is not None else 0.0
         ok = c >= 0.85
         matches += int(ok)
@@ -132,7 +160,13 @@ def best_lag(ref, other, max_seconds):
     mask=lags<=2*maxs
     vals=c[mask]
     lag=int(lags[mask][np.argmax(vals)])
-    score=float(vals.max()/(np.linalg.norm(ref)*np.linalg.norm(other)+1e-12))
+    # Normalize against the aligned sub-window, not the whole search range:
+    # other is much longer than ref, so normalizing by norm(other) dilutes
+    # the score and pushes genuine matches below the threshold.
+    aligned=other[lag:lag+n]
+    ln=min(n,len(aligned))
+    score=float(np.dot(ref[:ln],aligned[:ln]) /
+                (np.linalg.norm(ref[:ln])*np.linalg.norm(aligned[:ln])+1e-12))
     return lag,score
 
 def analyze(a,b,total,max_offset,samples=5,window=CHUNK):
@@ -218,7 +252,8 @@ def main():
     if not get_stream(ia,"audio") or not get_stream(ib,"audio"):
         die("both inputs need at least one audio stream")
 
-    if not verify_video_identity(args.reference,args.second,ia,ib) and not args.force:
+    if not verify_video_identity(args.reference,args.second,ia,ib,
+                                 max_offset=args.max_offset) and not args.force:
         die("video identity check failed; use --force only if the releases are known identical")
 
     with tempfile.TemporaryDirectory(prefix="audiosync-") as td:
