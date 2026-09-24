@@ -25,6 +25,8 @@ import numpy as np
 
 SR = 2000
 CHUNK = 30.0
+REFINE_WIN = 0.5
+REFINE_STEP = 0.05
 
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -83,11 +85,15 @@ def verify_video_identity(a,b,ia,ib,samples=4,max_offset=180.0):
     for k in pa:
         print(f"  {k:13}: {pa[k]} | {pb[k]}", file=sys.stderr)
 
-    structural = all(pa[k] == pb[k] for k in
-                     ("codec_name","width","height","pix_fmt"))
+    # Encodes of the same film can differ in resolution/codec/pix_fmt; the
+    # downscaled frame signatures are resolution-independent, so differing
+    # stream parameters are a warning, not a hard fail.
+    if pa["width"] != pb["width"] or pa["height"] != pb["height"]:
+        print("  NOTE: resolutions differ; relying on downscaled frame "
+              "signatures", file=sys.stderr)
     common = min(duration(ia),duration(ib))
-    if not structural or common < 5:
-        print("  RESULT: FAIL (different video parameters)", file=sys.stderr)
+    if common < 5:
+        print("  RESULT: FAIL (input too short)", file=sys.stderr)
         return False
 
     positions = np.linspace(common*.15, common*.85, samples)
@@ -106,7 +112,17 @@ def verify_video_identity(a,b,ia,ib,samples=4,max_offset=180.0):
                 c = corr(sa,sb) if sb is not None else 0.0
                 if c > bc: bd,bc = dt,c
             if bc >= 0.85:
-                return bd,bc
+                # Refine to sub-grid resolution. The frame-signature average is
+                # only ~5 frames wide and -ss keyframe seeking adds jitter near
+                # GOP boundaries, so a coarse grid can quantize the peak by a
+                # tenth of a second and push genuine matches below threshold.
+                bb,cc = bd,bc
+                for dt in np.arange(bd-REFINE_WIN,bd+REFINE_WIN+REFINE_STEP,
+                                    REFINE_STEP):
+                    sb = frame_sig(b,float(t+dt))
+                    c = corr(sa,sb) if sb is not None else 0.0
+                    if c > cc: bb,cc = dt,c
+                return bb,cc
         return None
 
     aligned = [r for r in (best_alignment(float(t)) for t in positions)
@@ -122,11 +138,16 @@ def verify_video_identity(a,b,ia,ib,samples=4,max_offset=180.0):
     matches = 0
     for t in positions:
         sa = frame_sig(a,float(t))
-        sb = frame_sig(b,float(t+offset))
-        c = corr(sa,sb) if sa is not None and sb is not None else 0.0
-        ok = c >= 0.85
+        if sa is None: continue
+        bc = 0.0
+        for dt in np.arange(offset-REFINE_WIN,offset+REFINE_WIN+REFINE_STEP,
+                            REFINE_STEP):
+            sb = frame_sig(b,float(t+dt))
+            c = corr(sa,sb) if sb is not None else 0.0
+            if c > bc: bc = c
+        ok = bc >= 0.85
         matches += int(ok)
-        print(f"  {t:10.2f}s: {'MATCH' if ok else 'DIFFER'} (corr={c:.3f})",
+        print(f"  {t:10.2f}s: {'MATCH' if ok else 'DIFFER'} (corr={bc:.3f})",
               file=sys.stderr)
 
     ok = matches >= max(3, math.ceil(samples*.75))
@@ -169,7 +190,7 @@ def best_lag(ref, other, max_seconds):
                 (np.linalg.norm(ref[:ln])*np.linalg.norm(aligned[:ln])+1e-12))
     return lag,score
 
-def analyze(a,b,total,max_offset,samples=5,window=CHUNK):
+def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
     # Windows are positioned identically in reference time; second recording
     # is searched around each position.
     if total < window+10:
@@ -193,7 +214,7 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK):
         results.append((float(offset),score,float(pos)))
 
     if not results: raise RuntimeError("Could not analyze audio")
-    good=[r[0] for r in results if r[1] >= 0.08]
+    good=[r[0] for r in results if r[1] >= threshold]
     if not good:
         raise RuntimeError("No reliable synchronization point found")
     selected=float(np.median(good))
@@ -265,7 +286,7 @@ def main():
 
         offset,spread,results=analyze(
             a,b,min(duration(ia),duration(ib)),
-            args.max_offset,args.samples)
+            args.max_offset,args.samples,threshold=args.threshold)
 
         print("\nAudio correlation:",file=sys.stderr)
         for o,s,t in results:
