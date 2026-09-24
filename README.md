@@ -20,17 +20,39 @@ The first audio track from the second file is added as the English track.
 2. Decodes sample frames from both files and compares downscaled grayscale
    structural signatures at several positions. Recordings of the same release
    can start at slightly different times (different channel padding), so a
-   constant video offset is first estimated and applied before comparing.
+   constant video offset is first estimated and applied before comparing. The
+   estimate is refined to sub-grid resolution (0.05 s), because the signature
+   window is only a few frames wide and coarse seeking can otherwise push
+   genuine matches below the similarity threshold.
 3. Extracts both first audio tracks as low-rate mono PCM solely for analysis.
-4. Determines the relative audio offset at five positions throughout the movie.
+4. Determines the relative audio offset at several positions throughout the
+   movie (default 5).
 5. Uses the median offset and rejects measurements that disagree by more than
    150 ms.
-6. Positive offset: trims the leading part of the second audio with `atrim` and
-   resets its PTS with `asetpts=PTS-STARTPTS` (the second audio starts later,
-   so its leading silence is cut and it is advanced).
-7. Negative offset: delays the second audio with `adelay` (the second audio
-   starts earlier, so it is pushed back to align with the reference).
+6. Positive offset: trims the leading audio of the second recording with
+   `atrim` and resets its PTS with `asetpts=PTS-STARTPTS`.
+7. Negative offset: delays the second recording's audio with `adelay` and
+   resets its PTS with `asetpts=PTS-STARTPTS`.
 8. Muxes the reference video + both audio tracks into the final MKV.
+
+## Parameters
+
+    positional:
+      reference            reference recording, e.g. German
+      second               second recording, e.g. English
+
+    -o, --output           output file (required)
+        --ref-lang         language tag of the reference track (default: de)
+        --second-lang      language tag of the second track (default: en)
+        --ref-title        title of the reference track (default: Deutsch)
+        --second-title     title of the second track (default: English)
+        --max-offset       maximum search window in seconds for the audio
+                           correlation (default: 180)
+        --samples          number of audio analysis positions (default: 5)
+        --threshold        minimum normalized correlation score for an audio
+                           measurement to be accepted (default: 0.08)
+        --force            continue despite a failed video identity check
+        --dry-run          run all checks and analysis, but write no output
 
 ## Important
 
@@ -60,8 +82,12 @@ same:
 
 ## Offset meaning
 
-    +1.250s  English starts 1.25 seconds later -> cut first 1.25 s (advance)
-    -1.250s  English starts 1.25 seconds earlier -> delay English by 1.25 s
+`offset = second - reference`.
+
+    +1.250s  second recording's audio starts 1.25 seconds later
+             -> trim the first 1.25 seconds of the second track
+    -1.250s  second recording's audio starts 1.25 seconds earlier
+             -> delay the second track by 1.25 seconds
 
 The tool deliberately aborts when the offset changes substantially during the
 movie. That usually indicates different cuts, PAL/NTSC speed differences,
