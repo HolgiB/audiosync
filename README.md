@@ -1,7 +1,9 @@
 # audiosync v2
 
-Small Linux tool for two Audials recordings of the **same movie release**,
-one recorded with German audio and one with English audio.
+Small Linux tool for two recordings of the **same movie release**, e.g. one
+recorded with German audio and one with English audio. It aligns the audio of the
+second recording to the reference and muxes video + both audio tracks into a
+single MKV.
 
 ## Requirements
 
@@ -12,7 +14,16 @@ one recorded with German audio and one with English audio.
     ./audiosync.py film-de.mkv film-en.mkv -o film.mkv
 
 The first file is the reference. Its video and first audio track are retained.
-The first audio track from the second file is added as the English track.
+The first audio track from the second file is added as the second language track.
+
+If the *second* file carries the better video, swap the two arguments — but then
+the language tags and the default flag must be passed explicitly, otherwise the
+tags and the default track will be wrong:
+
+    ./audiosync.py film-en.mkv film-de.mkv -o film.mkv \
+        --ref-lang en --second-lang de \
+        --ref-title English --second-title Deutsch \
+        --default-lang de
 
 ## What V2 does
 
@@ -33,7 +44,8 @@ The first audio track from the second file is added as the English track.
    `atrim` and resets its PTS with `asetpts=PTS-STARTPTS`.
 7. Negative offset: delays the second recording's audio with `adelay` and
    resets its PTS with `asetpts=PTS-STARTPTS`.
-8. Muxes the reference video + both audio tracks into the final MKV.
+8. Muxes the reference video + both audio tracks + the subtitle tracks of both
+   inputs into the final MKV.
 
 ## Parameters
 
@@ -46,6 +58,9 @@ The first audio track from the second file is added as the English track.
         --second-lang      language tag of the second track (default: en)
         --ref-title        title of the reference track (default: Deutsch)
         --second-title     title of the second track (default: English)
+        --default-lang     which audio track is flagged as default: de or en
+                           (default: de) — use this whenever the roles are
+                           swapped so the German track stays the default one
         --max-offset       maximum search window in seconds for the audio
                            correlation (default: 180)
         --samples          number of audio analysis positions (default: 5)
@@ -54,10 +69,40 @@ The first audio track from the second file is added as the English track.
         --force            continue despite a failed video identity check
         --dry-run          run all checks and analysis, but write no output
 
-## Important
+## Which file supplies the video?
 
 The reference video is copied with `-c:v copy`, so there is **no video
-re-encoding**.
+re-encoding** — and the output video is exactly the reference's video. The
+quality of the result therefore depends entirely on which file you pass first.
+
+Before merging, compare both sources:
+
+    ffprobe -v error -select_streams v:0 \
+        -show_entries stream=codec_name,width,height \
+        -show_entries format=duration,size -of json FILE
+
+If the second file has the higher resolution/bitrate, swap the arguments and set
+`--ref-lang`, `--second-lang`, `--ref-title`, `--second-title` and
+`--default-lang` accordingly (see Usage above).
+
+## Subtitles
+
+The subtitle tracks of **both** inputs are muxed into the output
+(`-map 0:s? -map 1:s? -c:s copy`), reference subtitles first. Nothing is
+re-encoded.
+
+Known limitation: the tool does not set the subtitle disposition explicitly, so
+the flags are whatever the muxer derives — in practice the tracks end up with
+`default=1`, and a source-side `forced` flag is not reliably preserved. For
+forced subtitles (foreign-language dialogue only) fix the flags afterwards:
+
+    mkvpropedit film_dual.mkv \
+        --edit track:s1 --set flag-forced=1 --set flag-default=0 \
+        --edit track:s2 --set flag-forced=0 --set flag-default=0
+
+Always verify with `ffprobe -show_streams` and look at `disposition`.
+
+## Audio encoding
 
 The corrected second audio is encoded as AAC 192 kbit/s. This is intentional:
 once an arbitrary audio filter (`adelay`/`atrim`) is applied, reliable
@@ -92,3 +137,23 @@ same:
 The tool deliberately aborts when the offset changes substantially during the
 movie. That usually indicates different cuts, PAL/NTSC speed differences,
 extra/missing scenes, or a bad correlation.
+
+## Common pitfalls
+
+**AVI/Xvid sources break the MKV mux.** An AVI whose video has no timestamps
+fails with *"Can't write packet with unknown timestamp"* / *"Error muxing a
+packet"* (exit 234). This is not a sync problem — remux first (stream copy, no
+re-encoding) and use the remux as input:
+
+    ffmpeg -fflags +genpts -i film-de.avi -c copy film-de.remux.mkv
+
+**Reading the failure output**
+
+    RESULT: FAIL (n/4) / no position aligns
+        different transfer or cut — not mergeable
+
+    audio offset is unstable (>150 ms spread)
+        the video matches but the audio timing does not (different dub or mix)
+
+    CalledProcessError from ffmpeg inside mux()
+        container/timestamp issue, the analysis itself was fine (see AVI above)

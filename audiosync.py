@@ -222,7 +222,7 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
     return selected,spread,results
 
 def mux(reference,second,out,offset,ref_lang,second_lang,
-        ref_title,second_title,force):
+        ref_title,second_title,force,default_lang="de"):
     # Filter the SECOND audio only. Sign convention: offset is the position of
     # the second recording's content relative to the reference (second - ref).
     # Positive => second content is later => advance it (trim leading audio).
@@ -232,18 +232,22 @@ def mux(reference,second,out,offset,ref_lang,second_lang,
     else:
         filt=f"adelay={-offset*1000:.3f}:all=1,asetpts=PTS-STARTPTS"
 
+    if default_lang == ref_lang:
+        disp=["-disposition:a:0","default","-disposition:a:1","0"]
+    else:
+        disp=["-disposition:a:0","0","-disposition:a:1","default"]
     cmd=["ffmpeg","-hide_banner","-y" if force else "-n",
          "-i",reference,"-i",second,
          "-map","0:v:0","-map","0:a:0","-map","[en]",
+         "-map","0:s?","-map","1:s?",
          "-filter_complex",f"[1:a:0]{filt}[en]",
          "-map_metadata","0","-map_chapters","0",
-         "-c:v","copy","-c:a","aac","-b:a","192k",
+         "-c:v","copy","-c:a","aac","-b:a","192k","-c:s","copy",
          "-metadata:s:a:0",f"language={ref_lang}",
          "-metadata:s:a:0",f"title={ref_title}",
          "-metadata:s:a:1",f"language={second_lang}",
          "-metadata:s:a:1",f"title={second_title}",
-         "-disposition:a:0","default",
-         "-disposition:a:1","0",out]
+         *disp,out]
     run(cmd)
 
 def main():
@@ -256,6 +260,8 @@ def main():
     ap.add_argument("--second-lang",default="en")
     ap.add_argument("--ref-title",default="Deutsch")
     ap.add_argument("--second-title",default="English")
+    ap.add_argument("--default-lang",choices=["de","en"],default="de",
+                    help="Spur, die als Default markiert wird (de|en), Standard de")
     ap.add_argument("--max-offset",type=float,default=180)
     ap.add_argument("--samples",type=int,default=5)
     ap.add_argument("--threshold",type=float,default=.08)
@@ -305,7 +311,7 @@ def main():
         print("\nCreating final MKV...",file=sys.stderr)
         mux(args.reference,args.second,args.output,offset,
             args.ref_lang,args.second_lang,args.ref_title,args.second_title,
-            args.force)
+            args.force,args.default_lang)
         print(f"Done: {args.output}",file=sys.stderr)
 
 if __name__=="__main__":
