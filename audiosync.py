@@ -27,6 +27,7 @@ SR = 2000
 CHUNK = 30.0
 REFINE_WIN = 0.5
 REFINE_STEP = 0.05
+CONSENSUS_TOL = 0.15
 
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -217,8 +218,20 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
     good=[r[0] for r in results if r[1] >= threshold]
     if not good:
         raise RuntimeError("No reliable synchronization point found")
-    selected=float(np.median(good))
-    spread=float(max(good)-min(good))
+
+    # A single position can yield a spurious correlation peak (quiet scene,
+    # repeated music cue) whose score is still just above the threshold. Such
+    # an isolated outlier would blow up the max-min spread and abort an
+    # otherwise perfectly synchronized pair. Keep the largest cluster of
+    # measurements that agree within CONSENSUS_TOL; a genuine speed difference
+    # or different cut shows up as a consistent trend across positions, not as
+    # an isolated point, so it still fails the spread check in main().
+    cluster=max(([o for o in good if abs(o-c) <= CONSENSUS_TOL] for c in good),
+                key=len)
+    if len(cluster) < max(2, math.ceil(len(good)/2)):
+        raise RuntimeError("No reliable synchronization point found")
+    selected=float(np.median(cluster))
+    spread=float(max(cluster)-min(cluster))
     return selected,spread,results
 
 def mux(reference,second,out,offset,ref_lang,second_lang,

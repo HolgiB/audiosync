@@ -38,8 +38,12 @@ tags and the default track will be wrong:
 3. Extracts both first audio tracks as low-rate mono PCM solely for analysis.
 4. Determines the relative audio offset at several positions throughout the
    movie (default 5).
-5. Uses the median offset and rejects measurements that disagree by more than
-   150 ms.
+5. Keeps the largest cluster of measurements that agree within 150 ms — an
+   isolated outlier (quiet scene, a repeated music cue) whose score is still
+   just above the threshold is dropped — uses the median of that cluster, and
+   rejects the pair when the cluster itself still spreads by more than 150 ms.
+   A genuine speed difference or a different cut shows up as a consistent
+   trend across positions, not as an isolated point, so it still fails.
 6. Positive offset: trims the leading audio of the second recording with
    `atrim` and resets its PTS with `asetpts=PTS-STARTPTS`.
 7. Negative offset: delays the second recording's audio with `adelay` and
