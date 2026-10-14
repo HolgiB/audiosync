@@ -18,11 +18,11 @@ The first audio track from the second file is added as the second language track
 
 If the *second* file carries the better video, swap the two arguments — but then
 the language tags and the default flag must be passed explicitly, otherwise the
-tags and the default track will be wrong:
+tags and the default track will be wrong (track titles, however, follow the
+language tags automatically):
 
     ./audiosync.py film-en.mkv film-de.mkv -o film.mkv \
         --ref-lang en --second-lang de \
-        --ref-title English --second-title Deutsch \
         --default-lang de
 
 ## What V2 does
@@ -60,8 +60,10 @@ tags and the default track will be wrong:
     -o, --output           output file (required)
         --ref-lang         language tag of the reference track (default: de)
         --second-lang      language tag of the second track (default: en)
-        --ref-title        title of the reference track (default: Deutsch)
-        --second-title     title of the second track (default: English)
+        --ref-title        title of the reference track (default: derived from
+                           --ref-lang, e.g. en -> English)
+        --second-title     title of the second track (default: derived from
+                           --second-lang, e.g. de -> Deutsch)
         --default-lang     which audio track is flagged as default: de or en
                            (default: de) — use this whenever the roles are
                            swapped so the German track stays the default one

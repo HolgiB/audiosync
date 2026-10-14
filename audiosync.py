@@ -29,6 +29,15 @@ REFINE_WIN = 0.5
 REFINE_STEP = 0.05
 CONSENSUS_TOL = 0.15
 
+LANG_TITLES = {
+    "de":"Deutsch","en":"English","fr":"Français","es":"Español",
+    "it":"Italiano","pt":"Português","nl":"Nederlands","pl":"Polski",
+    "ru":"Русский","ja":"日本語","zh":"中文","tr":"Türkçe",
+}
+
+def lang_title(code):
+    return LANG_TITLES.get(str(code).lower(), str(code))
+
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
     raise SystemExit(2)
@@ -271,8 +280,10 @@ def main():
     ap.add_argument("-o","--output",required=True)
     ap.add_argument("--ref-lang",default="de")
     ap.add_argument("--second-lang",default="en")
-    ap.add_argument("--ref-title",default="Deutsch")
-    ap.add_argument("--second-title",default="English")
+    ap.add_argument("--ref-title",default=None,
+                    help="Titel der Referenzspur (Standard: aus --ref-lang)")
+    ap.add_argument("--second-title",default=None,
+                    help="Titel der zweiten Spur (Standard: aus --second-lang)")
     ap.add_argument("--default-lang",choices=["de","en"],default="de",
                     help="Spur, die als Default markiert wird (de|en), Standard de")
     ap.add_argument("--max-offset",type=float,default=180)
@@ -282,6 +293,9 @@ def main():
                     help="continue despite failed video identity check")
     ap.add_argument("--dry-run",action="store_true")
     args=ap.parse_args()
+
+    if args.ref_title is None: args.ref_title=lang_title(args.ref_lang)
+    if args.second_title is None: args.second_title=lang_title(args.second_lang)
 
     for f in (args.reference,args.second):
         if not os.path.isfile(f): die(f"file not found: {f}")
