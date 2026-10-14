@@ -118,13 +118,27 @@ The **reference audio is stream-copied** (`-c:a:0 copy`): it keeps its original
 codec and bitrate bit-for-bit, with no generation loss. This matters because the
 reference track is usually the one the library plays by default.
 
-Only the **second track is encoded**, to AAC 192 kbit/s (`-c:a:1 aac -b:a:1
-192k`). That is unavoidable — once an arbitrary audio filter (`adelay`/`atrim`)
-is applied to fix the offset, the stream has to be rewritten. 192k is chosen
-against the source rate: the recordings in this collection are MP3 128 kbit/s,
-and roughly 1.5x the source rate is the point where an added generation stays
-inaudible. Higher wastes space (the ceiling is the source), lower adds loss on
-top of loss.
+Only the **second track is encoded**, to AAC 160 kbit/s (`-c:a:1 aac -b:a:1
+160k`). That is unavoidable — once an arbitrary audio filter (`adelay`/`atrim`)
+is applied to fix the offset, the stream has to be rewritten.
+
+160k is a measured floor, not a guess. Test signal: a lossless music excerpt,
+first encoded to MP3 128k (the capture stage in this collection), then the AAC
+transcode, comparing the error against the original:
+
+| stage | total error | added by the AAC stage |
+|---|---|---|
+| MP3 128k (source) | -20.0 dB | — |
+| + AAC 128k | -15.9 dB | -18.1 dB |
+| + AAC 160k | -17.6 dB | -21.5 dB |
+| + AAC 192k | -18.2 dB | -23.6 dB |
+
+At 160k and 192k the added error sits *below* the error the source already
+carries, so it is masked in practice — and the two are only 0.6 dB apart. At
+128k the add-on equals the source's own error and the total error energy grows
+~2.6x. Hence 160k as the floor: above it the gain is negligible, below it the
+second lossy step stops hiding. (RMS error, not a hearing model — valid as a
+comparison between the three rates, not as an audibility proof.)
 
 Result: two tracks of possibly different codecs (e.g. MP3 + AAC) in one MKV.
 That is fine for Matroska and for every player used here.

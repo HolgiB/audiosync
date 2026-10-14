@@ -281,7 +281,9 @@ def mux(reference,second,out,offset,ref_lang,second_lang,
          # Referenzspur wird KOPIERT (kein Generationenverlust, Original-Bitrate
          # bleibt erhalten). Nur die zweite Spur wird encodiert, weil sie durch
          # den Zeitversatz sowieso neu geschrieben werden muss.
-         "-c:a:0","copy","-c:a:1","aac","-b:a:1","192k","-c:s","copy",
+         # 160k ist die gemessene Untergrenze: darunter (128k) ist der Zusatz der
+         # AAC-Stufe so gross wie der Fehler, den die Quelle schon traegt.
+         "-c:a:0","copy","-c:a:1","aac","-b:a:1","160k","-c:s","copy",
          "-metadata:s:a:0",f"language={ref_lang}",
          "-metadata:s:a:0",f"title={ref_title}",
          "-metadata:s:a:1",f"language={second_lang}",
