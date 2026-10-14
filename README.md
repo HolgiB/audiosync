@@ -64,9 +64,13 @@ language tags automatically):
                            --ref-lang, e.g. en -> English)
         --second-title     title of the second track (default: derived from
                            --second-lang, e.g. de -> Deutsch)
-        --default-lang     which audio track is flagged as default: de or en
-                           (default: de) — use this whenever the roles are
-                           swapped so the German track stays the default one
+        --default-lang     which audio track carries the `default` flag: a
+                           language code (de, en, fr, ...) or the words
+                           `ref` / `second` (default: de). Use it whenever the
+                           roles are swapped so the German track stays the
+                           default one. A value that matches neither track's
+                           language aborts with an error instead of silently
+                           flagging the other track.
         --max-offset       maximum search window in seconds for the audio
                            correlation (default: 180)
         --samples          number of audio analysis positions (default: 5)
@@ -110,15 +114,25 @@ Always verify with `ffprobe -show_streams` and look at `disposition`.
 
 ## Audio encoding
 
-The corrected second audio is encoded as AAC 192 kbit/s. This is intentional:
-once an arbitrary audio filter (`adelay`/`atrim`) is applied, reliable
-stream-copying is not possible for arbitrary source codecs. The original
-reference audio is also currently encoded by ffmpeg because both mapped audio
-streams share the same `-c:a aac` setting.
+The **reference audio is stream-copied** (`-c:a:0 copy`): it keeps its original
+codec and bitrate bit-for-bit, with no generation loss. This matters because the
+reference track is usually the one the library plays by default.
 
-If lossless audio preservation is important, the mux step can be extended to
-encode only the corrected second track while stream-copying the reference
-track.
+Only the **second track is encoded**, to AAC 192 kbit/s (`-c:a:1 aac -b:a:1
+192k`). That is unavoidable — once an arbitrary audio filter (`adelay`/`atrim`)
+is applied to fix the offset, the stream has to be rewritten. 192k is chosen
+against the source rate: the recordings in this collection are MP3 128 kbit/s,
+and roughly 1.5x the source rate is the point where an added generation stays
+inaudible. Higher wastes space (the ceiling is the source), lower adds loss on
+top of loss.
+
+Result: two tracks of possibly different codecs (e.g. MP3 + AAC) in one MKV.
+That is fine for Matroska and for every player used here.
+
+Fully lossless (both tracks copied, the offset applied as a container-level
+track shift via `mkvmerge --sync`) is possible but would mean replacing the mux
+step; millisecond precision there is far below the ~20 ms A/V tolerance, so it
+is a real option if it is ever worth the rework.
 
 ## Dry run
 

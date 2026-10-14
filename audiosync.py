@@ -38,6 +38,19 @@ LANG_TITLES = {
 def lang_title(code):
     return LANG_TITLES.get(str(code).lower(), str(code))
 
+def ref_is_default_flag(value,ref_lang,second_lang):
+    """Welche Spur traegt den default-Flag? Akzeptiert 'ref'/'second' oder
+    einen Sprachcode. Unbekannte Werte brechen ab, statt still die andere
+    Spur zu markieren (der Fehler aus der de/en-Version)."""
+    v=str(value).strip().lower()
+    if v in ("ref","reference","first","1"): return True
+    if v in ("second","2"): return False
+    if v==str(ref_lang).strip().lower(): return True
+    if v==str(second_lang).strip().lower(): return False
+    die(f"--default-lang '{value}' passt zu keiner der beiden Spuren "
+        f"(ref-lang={ref_lang}, second-lang={second_lang}); erlaubt ist ein "
+        f"Sprachcode dieser beiden Spuren oder 'ref'/'second'")
+
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
     raise SystemExit(2)
@@ -244,7 +257,7 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
     return selected,spread,results
 
 def mux(reference,second,out,offset,ref_lang,second_lang,
-        ref_title,second_title,force,default_lang="de"):
+        ref_title,second_title,force,ref_is_default=True):
     # Filter the SECOND audio only. Sign convention: offset is the position of
     # the second recording's content relative to the reference (second - ref).
     # Positive => second content is later => advance it (trim leading audio).
@@ -254,7 +267,7 @@ def mux(reference,second,out,offset,ref_lang,second_lang,
     else:
         filt=f"adelay={-offset*1000:.3f}:all=1,asetpts=PTS-STARTPTS"
 
-    if default_lang == ref_lang:
+    if ref_is_default:
         disp=["-disposition:a:0","default","-disposition:a:1","0"]
     else:
         disp=["-disposition:a:0","0","-disposition:a:1","default"]
@@ -264,7 +277,11 @@ def mux(reference,second,out,offset,ref_lang,second_lang,
          "-map","0:s?","-map","1:s?",
          "-filter_complex",f"[1:a:0]{filt}[en]",
          "-map_metadata","0","-map_chapters","0",
-         "-c:v","copy","-c:a","aac","-b:a","192k","-c:s","copy",
+         "-c:v","copy",
+         # Referenzspur wird KOPIERT (kein Generationenverlust, Original-Bitrate
+         # bleibt erhalten). Nur die zweite Spur wird encodiert, weil sie durch
+         # den Zeitversatz sowieso neu geschrieben werden muss.
+         "-c:a:0","copy","-c:a:1","aac","-b:a:1","192k","-c:s","copy",
          "-metadata:s:a:0",f"language={ref_lang}",
          "-metadata:s:a:0",f"title={ref_title}",
          "-metadata:s:a:1",f"language={second_lang}",
@@ -284,8 +301,10 @@ def main():
                     help="Titel der Referenzspur (Standard: aus --ref-lang)")
     ap.add_argument("--second-title",default=None,
                     help="Titel der zweiten Spur (Standard: aus --second-lang)")
-    ap.add_argument("--default-lang",choices=["de","en"],default="de",
-                    help="Spur, die als Default markiert wird (de|en), Standard de")
+    ap.add_argument("--default-lang",default="de",
+                    help="Spur, die als Default markiert wird: Sprachcode (de, en, "
+                         "fr, ...) oder 'ref'/'second'. Standard de. Ein Code, der zu "
+                         "keiner der beiden Spuren passt, bricht ab.")
     ap.add_argument("--max-offset",type=float,default=180)
     ap.add_argument("--samples",type=int,default=5)
     ap.add_argument("--threshold",type=float,default=.08)
@@ -338,7 +357,8 @@ def main():
         print("\nCreating final MKV...",file=sys.stderr)
         mux(args.reference,args.second,args.output,offset,
             args.ref_lang,args.second_lang,args.ref_title,args.second_title,
-            args.force,args.default_lang)
+            args.force,
+            ref_is_default_flag(args.default_lang,args.ref_lang,args.second_lang))
         print(f"Done: {args.output}",file=sys.stderr)
 
 if __name__=="__main__":
