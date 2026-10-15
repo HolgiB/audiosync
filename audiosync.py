@@ -256,8 +256,54 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
     spread=float(max(cluster)-min(cluster))
     return selected,spread,results
 
+# --- Audiospuren: was wird kopiert, was encodiert --------------------------
+LOSSLESS_CODECS = {
+    "flac","alac","ape","wavpack","tta","truehd","mlp",
+    "pcm_bluray","pcm_dvd",
+}
+AAC_BITRATE_STEREO = "192k"   # gemessen: bei verlustfreier Quelle bringt 192k
+AAC_BITRATE_MULTI  = "384k"   # 2,1 dB gegenueber 160k; 5.1 braucht deutlich mehr
+
+def is_lossless(codec):
+    c=str(codec or "").lower()
+    return c.startswith("pcm_") or c in LOSSLESS_CODECS
+
+def aac_bitrate(channels,stereo=AAC_BITRATE_STEREO,multi=AAC_BITRATE_MULTI):
+    """Kanalabhaengig: 192k ist eine Stereo-Zahl. Dieselbe Zahl auf 5.1 waere
+    kein Transcode, sondern ein zweiter Downmix."""
+    try: ch=int(channels)
+    except (TypeError,ValueError): ch=2
+    return multi if ch>2 else stereo
+
+def audio_codec_args(ref_stream,second_stream,mode="auto",
+                     stereo=AAC_BITRATE_STEREO,multi=AAC_BITRATE_MULTI):
+    """Codec-Argumente fuer die beiden Ausgabespuren.
+
+    Referenz: kopieren, wenn sie schon verlustbehaftet ist - dann ist die
+    vorhandene Bitrate die Obergrenze und ein weiterer Lauf setzt nur eine Stufe
+    drauf. Verlustfrei (FLAC/PCM) wird encodiert, sonst schleppt die Datei die
+    riesige FLAC-Spur mit.
+    Zweite Spur: laeuft immer durch den Versatzfilter. Ein gefilterter Stream
+    kann nicht kopiert werden, sie wird also immer encodiert.
+    """
+    def codec(s): return str((s or {}).get("codec_name") or "").lower()
+    def ch(s):
+        try: return int((s or {}).get("channels") or 2)
+        except (TypeError,ValueError): return 2
+    ref_enc = (mode=="encode") or (mode=="auto" and is_lossless(codec(ref_stream)))
+    if ref_enc:
+        br=aac_bitrate(ch(ref_stream),stereo,multi)
+        args=["-c:a:0","aac","-b:a:0",br]
+        txt_ref=f"{codec(ref_stream) or '?'} -> AAC {br}"
+    else:
+        args=["-c:a:0","copy"]
+        txt_ref=f"{codec(ref_stream) or '?'} -> kopiert (bitgenau)"
+    br2=aac_bitrate(ch(second_stream),stereo,multi)
+    args+=["-c:a:1","aac","-b:a:1",br2]
+    return args,txt_ref,f"{codec(second_stream) or '?'} -> AAC {br2}"
+
 def mux(reference,second,out,offset,ref_lang,second_lang,
-        ref_title,second_title,force,ref_is_default=True):
+        ref_title,second_title,force,ref_is_default=True,audio_args=None):
     # Filter the SECOND audio only. Sign convention: offset is the position of
     # the second recording's content relative to the reference (second - ref).
     # Positive => second content is later => advance it (trim leading audio).
@@ -278,12 +324,10 @@ def mux(reference,second,out,offset,ref_lang,second_lang,
          "-filter_complex",f"[1:a:0]{filt}[en]",
          "-map_metadata","0","-map_chapters","0",
          "-c:v","copy",
-         # Referenzspur wird KOPIERT (kein Generationenverlust, Original-Bitrate
-         # bleibt erhalten). Nur die zweite Spur wird encodiert, weil sie durch
-         # den Zeitversatz sowieso neu geschrieben werden muss.
-         # 160k ist die gemessene Untergrenze: darunter (128k) ist der Zusatz der
-         # AAC-Stufe so gross wie der Fehler, den die Quelle schon traegt.
-         "-c:a:0","copy","-c:a:1","aac","-b:a:1","160k","-c:s","copy",
+         # Audio: siehe audio_codec_args() - Referenz kopieren oder encodieren,
+         # zweite Spur immer encodieren (Versatzfilter).
+         *(audio_args or ["-c:a:0","copy","-c:a:1","aac","-b:a:1",AAC_BITRATE_STEREO]),
+         "-c:s","copy",
          "-metadata:s:a:0",f"language={ref_lang}",
          "-metadata:s:a:0",f"title={ref_title}",
          "-metadata:s:a:1",f"language={second_lang}",
@@ -307,6 +351,14 @@ def main():
                     help="Spur, die als Default markiert wird: Sprachcode (de, en, "
                          "fr, ...) oder 'ref'/'second'. Standard de. Ein Code, der zu "
                          "keiner der beiden Spuren passt, bricht ab.")
+    ap.add_argument("--audio",choices=["auto","copy","encode"],default="auto",
+                    help="auto: verlustfreie Referenz nach AAC encodieren, "
+                         "verlustbehaftete kopieren (Standard) | copy: Referenz "
+                         "immer kopieren | encode: Referenz immer encodieren. "
+                         "Die zweite Spur wird immer encodiert (Versatzfilter).")
+    ap.add_argument("--aac-bitrate-stereo",default=AAC_BITRATE_STEREO)
+    ap.add_argument("--aac-bitrate-multi",default=AAC_BITRATE_MULTI,
+                    help="Bitrate fuer mehr als zwei Kanaele (5.1), Standard 384k")
     ap.add_argument("--max-offset",type=float,default=180)
     ap.add_argument("--samples",type=int,default=5)
     ap.add_argument("--threshold",type=float,default=.08)
@@ -327,8 +379,16 @@ def main():
     if not get_stream(ia,"audio") or not get_stream(ib,"audio"):
         die("both inputs need at least one audio stream")
 
-    if not verify_video_identity(args.reference,args.second,ia,ib,
-                                 max_offset=args.max_offset) and not args.force:
+    audio_args,txt_ref,txt_second=audio_codec_args(
+        get_stream(ia,"audio"),get_stream(ib,"audio"),args.audio,
+        args.aac_bitrate_stereo,args.aac_bitrate_multi)
+    print(f"\nAudio ({args.audio}): Referenz {txt_ref} | zweite {txt_second}",
+          file=sys.stderr)
+
+    # Reihenfolge wichtig: mit --force wird der teure Identitaetstest gar nicht
+    # erst gerechnet (vorher lief er immer und das Ergebnis wurde verworfen).
+    if not args.force and not verify_video_identity(args.reference,args.second,ia,ib,
+                                                    max_offset=args.max_offset):
         die("video identity check failed; use --force only if the releases are known identical")
 
     with tempfile.TemporaryDirectory(prefix="audiosync-") as td:
@@ -360,7 +420,8 @@ def main():
         mux(args.reference,args.second,args.output,offset,
             args.ref_lang,args.second_lang,args.ref_title,args.second_title,
             args.force,
-            ref_is_default_flag(args.default_lang,args.ref_lang,args.second_lang))
+            ref_is_default_flag(args.default_lang,args.ref_lang,args.second_lang),
+            audio_args)
         print(f"Done: {args.output}",file=sys.stderr)
 
 if __name__=="__main__":

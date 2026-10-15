@@ -71,6 +71,15 @@ language tags automatically):
                            default one. A value that matches neither track's
                            language aborts with an error instead of silently
                            flagging the other track.
+        --audio            auto | copy | encode (default: auto). auto = a lossless
+                           reference (FLAC/PCM/ALAC) is encoded to AAC, a lossy
+                           one is stream-copied; copy = always copy the reference;
+                           encode = always encode it. The second track is always
+                           encoded (it runs through the offset filter).
+        --aac-bitrate-stereo   bitrate for encoded tracks with up to two channels
+                           (default: 192k)
+        --aac-bitrate-multi    bitrate for more than two channels, e.g. 5.1
+                           (default: 384k)
         --max-offset       maximum search window in seconds for the audio
                            correlation (default: 180)
         --samples          number of audio analysis positions (default: 5)
@@ -118,9 +127,22 @@ The **reference audio is stream-copied** (`-c:a:0 copy`): it keeps its original
 codec and bitrate bit-for-bit, with no generation loss. This matters because the
 reference track is usually the one the library plays by default.
 
-Only the **second track is encoded**, to AAC 160 kbit/s (`-c:a:1 aac -b:a:1
-160k`). That is unavoidable — once an arbitrary audio filter (`adelay`/`atrim`)
-is applied to fix the offset, the stream has to be rewritten.
+Which track is copied and which is encoded follows `--audio`:
+
+- **Reference track:** a lossy source (MP3/AAC/AC3/...) is **stream-copied**, so
+  its existing bitrate is kept bit-for-bit and no further generation is added. A
+  **lossless** source (FLAC/PCM/ALAC) is **encoded to AAC** — otherwise the output
+  drags the lossless track along into the library (5.1 FLAC runs at ~4 Mbit/s).
+- **Second track:** always encoded. It runs through the offset filter
+  (`adelay`/`atrim`), and a filtered stream cannot be stream-copied.
+
+Bitrates are channel-aware: **192k** up to two channels, **384k** for more (5.1).
+The stereo figure is not valid for six channels — encoding 5.1 at a stereo rate,
+or down to stereo, would be a second downmix rather than a transcode.
+
+192k follows from the measurements below: with a lossless capture the transcode is
+the only lossy step, nothing masks it any more, and 192k buys 2.1 dB over 160k for
+28 MB per 2 h track.
 
 160k is a measured floor, not a guess. Test signal: a lossless music excerpt,
 first encoded to MP3 128k (the capture stage in this collection), then the AAC
@@ -136,8 +158,10 @@ transcode, comparing the error against the original:
 At 160k and 192k the added error sits *below* the error the source already
 carries, so it is masked in practice — and the two are only 0.6 dB apart. At
 128k the add-on equals the source's own error and the total error energy grows
-~2.6x. Hence 160k as the floor: above it the gain is negligible, below it the
-second lossy step stops hiding. (RMS error, not a hearing model — valid as a
+~2.6x. So for a *lossy* source everything from 160k up is masked, and 128k is
+where the second lossy step stops hiding — that was the argument for 160k. With a
+*lossless* source the 192k/384k default applies instead, because nothing masks
+the transcode any more. (RMS error, not a hearing model — valid as a
 comparison between the three rates, not as an audibility proof.)
 
 Result: two tracks of possibly different codecs (e.g. MP3 + AAC) in one MKV.
