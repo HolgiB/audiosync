@@ -29,24 +29,70 @@ REFINE_WIN = 0.5
 REFINE_STEP = 0.05
 CONSENSUS_TOL = 0.15
 
-LANG_TITLES = {
-    "de":"Deutsch","en":"English","fr":"Français","es":"Español",
-    "it":"Italiano","pt":"Português","nl":"Nederlands","pl":"Polski",
-    "ru":"Русский","ja":"日本語","zh":"中文","tr":"Türkçe",
-}
+# Sprachen: (ISO 639-1 zweistellig, ISO 639-2/B dreistellig, lesbarer Titel).
+# Die B-Formen (ger, fre, dut ...) sind die in Matroska/ffmpeg ueblichen; die
+# T-Formen (deu, fra, nld) werden beim Einlesen trotzdem erkannt.
+LANGS = [
+    ("de","ger","Deutsch"),   ("en","eng","English"),      ("fr","fre","Français"),
+    ("es","spa","Español"),   ("it","ita","Italiano"),     ("pt","por","Português"),
+    ("nl","dut","Nederlands"),("pl","pol","Polski"),       ("ru","rus","Русский"),
+    ("uk","ukr","Українська"),("sv","swe","Svenska"),      ("da","dan","Dansk"),
+    ("no","nor","Norsk"),     ("fi","fin","Suomi"),        ("is","ice","Íslenska"),
+    ("cs","cze","Čeština"),   ("sk","slo","Slovenčina"),   ("hu","hun","Magyar"),
+    ("ro","rum","Română"),    ("bg","bul","Български"),    ("el","gre","Ελληνικά"),
+    ("tr","tur","Türkçe"),    ("he","heb","עברית"),        ("ar","ara","العربية"),
+    ("fa","per","فارسی"),     ("hi","hin","हिन्दी"),         ("th","tha","ไทย"),
+    ("vi","vie","Tiếng Việt"),("id","ind","Bahasa Indonesia"),
+    ("ja","jpn","日本語"),     ("ko","kor","한국어"),          ("zh","chi","中文"),
+    ("ca","cat","Català"),    ("hr","hrv","Hrvatski"),     ("sr","srp","Српски"),
+    ("lt","lit","Lietuvių"),  ("lv","lav","Latviešu"),     ("et","est","Eesti"),
+]
+LANG_TITLES = {a:t for a,b,t in LANGS}
+LANG_2TO3 = {a:b for a,b,t in LANGS}
+LANG_3TO2 = {b:a for a,b,t in LANGS}
+LANG_3TO2.update({"deu":"de","fra":"fr","nld":"nl","zho":"zh","ces":"cs",
+                  "ell":"el","hun":"hu","ron":"ro","fas":"fa","ind":"id"})
+
+KNOWN_LANGS = ", ".join(a for a,b,t in LANGS)
+
+def canonical_lang(code):
+    """Zwei- oder dreistelliges Kuerzel auf die zweistellige Form bringen."""
+    c=str(code).strip().lower()
+    if c in LANG_2TO3: return c
+    if c in LANG_3TO2: return LANG_3TO2[c]
+    return None
 
 def lang_title(code):
-    return LANG_TITLES.get(str(code).lower(), str(code))
+    """Lesbarer Spurtitel. 3-stellige Kuerzel werden genauso erkannt."""
+    return LANG_TITLES.get(canonical_lang(code), str(code))
+
+def lang_tag(code, style):
+    """Kuerzel fuer den Metadaten-Eintrag. 'asis' reicht unveraendert durch."""
+    c=canonical_lang(code)
+    if style=="iso639-2" and c: return LANG_2TO3[c]
+    if style=="iso639-1" and c: return c
+    return str(code)
+
+def warn_unknown_lang(code, option):
+    """Tippfehler sollen nicht still in die Metadaten wandern."""
+    if canonical_lang(code) is None:
+        print(f"WARNUNG: {option} '{code}' ist kein bekanntes Sprachkuerzel; "
+              f"der Wert wird unveraendert geschrieben. Bekannt sind: "
+              f"{KNOWN_LANGS}", file=sys.stderr)
 
 def ref_is_default_flag(value,ref_lang,second_lang):
     """Welche Spur traegt den default-Flag? Akzeptiert 'ref'/'second' oder
     einen Sprachcode. Unbekannte Werte brechen ab, statt still die andere
-    Spur zu markieren (der Fehler aus der de/en-Version)."""
+    Spur zu markieren (der Fehler aus der de/en-Version). Zwei- und
+    dreistellige Kuerzel werden dabei als gleich behandelt."""
     v=str(value).strip().lower()
     if v in ("ref","reference","first","1"): return True
     if v in ("second","2"): return False
-    if v==str(ref_lang).strip().lower(): return True
-    if v==str(second_lang).strip().lower(): return False
+    vc=canonical_lang(v) or v
+    rc=canonical_lang(ref_lang) or str(ref_lang).strip().lower()
+    sc=canonical_lang(second_lang) or str(second_lang).strip().lower()
+    if vc==rc: return True
+    if vc==sc: return False
     die(f"--default-lang '{value}' passt zu keiner der beiden Spuren "
         f"(ref-lang={ref_lang}, second-lang={second_lang}); erlaubt ist ein "
         f"Sprachcode dieser beiden Spuren oder 'ref'/'second'")
@@ -351,6 +397,13 @@ def main():
                     help="Spur, die als Default markiert wird: Sprachcode (de, en, "
                          "fr, ...) oder 'ref'/'second'. Standard de. Ein Code, der zu "
                          "keiner der beiden Spuren passt, bricht ab.")
+    ap.add_argument("--tag-style",choices=["asis","iso639-1","iso639-2"],
+                    default="asis",
+                    help="Sprachkuerzel in den Metadaten: asis = unveraendert "
+                         "(Standard), iso639-1 = zweistellig (de), "
+                         "iso639-2 = dreistellig (ger). Der Spurtitel bleibt "
+                         "in jedem Fall lesbar. Unbekannte Kuerzel werden "
+                         "gemeldet, aber durchgereicht.")
     ap.add_argument("--audio",choices=["auto","copy","encode"],default="auto",
                     help="auto: verlustfreie Referenz nach AAC encodieren, "
                          "verlustbehaftete kopieren (Standard) | copy: Referenz "
@@ -367,8 +420,14 @@ def main():
     ap.add_argument("--dry-run",action="store_true")
     args=ap.parse_args()
 
+    # Sprachtags: erst melden, dann Titel ableiten, dann die Form bestimmen,
+    # die in die Metadaten geht (--tag-style, Standard: unveraendert).
+    warn_unknown_lang(args.ref_lang,"--ref-lang")
+    warn_unknown_lang(args.second_lang,"--second-lang")
     if args.ref_title is None: args.ref_title=lang_title(args.ref_lang)
     if args.second_title is None: args.second_title=lang_title(args.second_lang)
+    args.ref_lang=lang_tag(args.ref_lang,args.tag_style)
+    args.second_lang=lang_tag(args.second_lang,args.tag_style)
 
     for f in (args.reference,args.second):
         if not os.path.isfile(f): die(f"file not found: {f}")

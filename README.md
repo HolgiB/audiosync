@@ -70,7 +70,15 @@ language tags automatically):
                            roles are swapped so the German track stays the
                            default one. A value that matches neither track's
                            language aborts with an error instead of silently
-                           flagging the other track.
+                           flagging the other track. Two- and three-letter
+                           codes are treated as the same language, so
+                           `--default-lang ger` also matches `--ref-lang de`.
+        --tag-style        form of the language codes written to the metadata:
+                           `asis` = pass through unchanged (default),
+                           `iso639-1` = two letters (de), `iso639-2` = three
+                           letters (ger). The track title is readable in every
+                           case. Codes that are not recognised are reported on
+                           stderr but still written unchanged.
         --audio            auto | copy | encode (default: auto). auto = a lossless
                            reference (FLAC/PCM/ALAC) is encoded to AAC, a lossy
                            one is stream-copied; copy = always copy the reference;
@@ -87,6 +95,30 @@ language tags automatically):
                            measurement to be accepted (default: 0.08)
         --force            continue despite a failed video identity check
         --dry-run          run all checks and analysis, but write no output
+
+### Language tags
+
+`--ref-lang`, `--second-lang` and `--default-lang` accept the two-letter
+(ISO 639-1) and the three-letter form (`ger`, `eng`, `fre`, ...) alike. Which
+form ends up in the file is controlled by `--tag-style`; the track title is
+derived from the same table and is always a readable name:
+
+    de/ger Deutsch          en/eng English            fr/fre Français
+    es/spa Español          it/ita Italiano           pt/por Português
+    nl/dut Nederlands       pl/pol Polski             ru/rus Русский
+    uk/ukr Українська       sv/swe Svenska            da/dan Dansk
+    no/nor Norsk            fi/fin Suomi              is/ice Íslenska
+    cs/cze Čeština          sk/slo Slovenčina         hu/hun Magyar
+    ro/rum Română           bg/bul Български          el/gre Ελληνικά
+    tr/tur Türkçe           he/heb עברית              ar/ara العربية
+    fa/per فارسی            hi/hin हिन्दी               th/tha ไทย
+    vi/vie Tiếng Việt       id/ind Bahasa Indonesia   ja/jpn 日本語
+    ko/kor 한국어             zh/chi 中文                ca/cat Català
+    hr/hrv Hrvatski         sr/srp Српски             lt/lit Lietuvių
+    lv/lav Latviešu         et/est Eesti
+
+Anything outside this table is written through as given — a warning on stderr
+names the known codes so a typo does not disappear into the metadata silently.
 
 ## Which file supplies the video?
 
