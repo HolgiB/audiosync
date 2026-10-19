@@ -37,18 +37,28 @@ language tags automatically):
    genuine matches below the similarity threshold.
 3. Extracts both first audio tracks as low-rate mono PCM solely for analysis.
 4. Determines the relative audio offset at several positions throughout the
-   movie (default 5).
-5. Keeps the largest cluster of measurements that agree within 150 ms — an
+   movie (default 5) by cross-correlating the raw waveform.
+5. If the waveform pass finds too few agreeing positions — typical for
+   dialogue-heavy material such as **two separate captures of the same episode**
+   (Audials/Netflix in two language runs), where the mix carries little shared
+   music — it automatically retries on the **onset envelope**: the positive
+   difference of the log RMS at 2 ms resolution. The envelope keeps the shared
+   onsets (music, effects, cuts) and is far less sensitive to the different
+   dialogue, so it still finds the offset. A plain log-RMS envelope is not used
+   on purpose — it is too smooth and scores arbitrary offsets; differentiating
+   it leaves only the shared onsets. The retried method is printed as
+   `Audio correlation (waveform)` or `Audio correlation (envelope)`.
+6. Keeps the largest cluster of measurements that agree within 150 ms — an
    isolated outlier (quiet scene, a repeated music cue) whose score is still
    just above the threshold is dropped — uses the median of that cluster, and
    rejects the pair when the cluster itself still spreads by more than 150 ms.
    A genuine speed difference or a different cut shows up as a consistent
    trend across positions, not as an isolated point, so it still fails.
-6. Positive offset: trims the leading audio of the second recording with
+7. Positive offset: trims the leading audio of the second recording with
    `atrim` and resets its PTS with `asetpts=PTS-STARTPTS`.
-7. Negative offset: delays the second recording's audio with `adelay` and
+8. Negative offset: delays the second recording's audio with `adelay` and
    resets its PTS with `asetpts=PTS-STARTPTS`.
-8. Muxes the reference video + both audio tracks + the subtitle tracks of both
+9. Muxes the reference video + both audio tracks + the subtitle tracks of both
    inputs into the final MKV.
 
 ## Parameters
@@ -228,6 +238,14 @@ The tool deliberately aborts when the offset changes substantially during the
 movie. That usually indicates different cuts, PAL/NTSC speed differences,
 extra/missing scenes, or a bad correlation.
 
+**Video offset and audio offset are not the same number.** The video identity
+step also reports an estimated video offset, but that is only a cross-check for
+the picture. Two separate captures of the same stream can carry different
+internal A/V delays, so the two can differ noticeably — measured on three
+episodes of one season: video +0.00 / +1.05 / +0.20 s against audio +0.064 /
++1.0595 / +0.220 s. The audio-derived value is the one that aligns the tracks;
+never substitute the video offset for it.
+
 ## Common pitfalls
 
 **AVI/Xvid sources break the MKV mux.** An AVI whose video has no timestamps
@@ -244,6 +262,11 @@ re-encoding) and use the remux as input:
 
     audio offset is unstable (>150 ms spread)
         the video matches but the audio timing does not (different dub or mix)
+
+    No reliable synchronization point found
+        both passes failed: the waveform pass and the onset-envelope fallback
+        each found too few agreeing positions. Typical for two independent
+        captures whose audio really is a different mix — not a sync bug.
 
     CalledProcessError from ffmpeg inside mux()
         container/timestamp issue, the analysis itself was fine (see AVI above)

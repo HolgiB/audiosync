@@ -28,6 +28,8 @@ CHUNK = 30.0
 REFINE_WIN = 0.5
 REFINE_STEP = 0.05
 CONSENSUS_TOL = 0.15
+ENV_HOP = 4              # samples at SR -> 2 ms envelope resolution
+ENV_THRESHOLD = 0.08
 
 # Sprachen: (ISO 639-1 zweistellig, ISO 639-2/B dreistellig, lesbarer Titel).
 # Die B-Formen (ger, fre, dut ...) sind die in Matroska/ffmpeg ueblichen; die
@@ -237,10 +239,10 @@ def prep(x):
     y=np.diff(x,prepend=x[0])
     return np.clip(y,-4,4)
 
-def best_lag(ref, other, max_seconds):
+def best_lag(ref, other, max_seconds, rate=SR):
     """Return signed shift of other relative to ref; positive means later."""
     n=len(ref)
-    maxs=int(max_seconds*SR)
+    maxs=int(max_seconds*rate)
     # Correlate ref with the whole second recording.
     m=len(other)
     size=1 << (n+m-1).bit_length()
@@ -259,30 +261,15 @@ def best_lag(ref, other, max_seconds):
                 (np.linalg.norm(ref[:ln])*np.linalg.norm(aligned[:ln])+1e-12))
     return lag,score
 
-def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
-    # Windows are positioned identically in reference time; second recording
-    # is searched around each position.
+def analysis_positions(total,samples,window=CHUNK):
     if total < window+10:
-        positions=[max(0,total/2-window/2)]
-    else:
-        lo=min(60.0,total*.10)
-        hi=max(lo,total-60.0-window)
-        positions=np.linspace(lo,hi,samples)
+        return [max(0,total/2-window/2)]
+    lo=min(60.0,total*.10)
+    hi=max(lo,total-60.0-window)
+    return np.linspace(lo,hi,samples)
 
-    results=[]
-    maxs=int(max_offset*SR)
-    for pos in positions:
-        aa=a[int(pos*SR):int((pos+window)*SR)]
-        if len(aa) < window*SR*.8: continue
-        bs=max(0,int((pos-max_offset)*SR))
-        be=min(len(b),int((pos+window+max_offset)*SR))
-        bb=b[bs:be]
-        lag,score=best_lag(aa,bb,max_offset)
-        # Convert lag relative to bb start to absolute second-vs-reference shift.
-        offset=(bs+lag)/SR-pos
-        results.append((float(offset),score,float(pos)))
-
-    if not results: raise RuntimeError("Could not analyze audio")
+def consensus(results,threshold):
+    """Largest agreeing cluster of measurements and its spread."""
     good=[r[0] for r in results if r[1] >= threshold]
     if not good:
         raise RuntimeError("No reliable synchronization point found")
@@ -300,6 +287,70 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
         raise RuntimeError("No reliable synchronization point found")
     selected=float(np.median(cluster))
     spread=float(max(cluster)-min(cluster))
+    return selected,spread
+
+def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
+    # Windows are positioned identically in reference time; second recording
+    # is searched around each position.
+    results=[]
+    for pos in analysis_positions(total,samples,window):
+        aa=a[int(pos*SR):int((pos+window)*SR)]
+        if len(aa) < window*SR*.8: continue
+        bs=max(0,int((pos-max_offset)*SR))
+        be=min(len(b),int((pos+window+max_offset)*SR))
+        bb=b[bs:be]
+        lag,score=best_lag(aa,bb,max_offset)
+        # Convert lag relative to bb start to absolute second-vs-reference shift.
+        offset=(bs+lag)/SR-pos
+        results.append((float(offset),score,float(pos)))
+
+    if not results: raise RuntimeError("Could not analyze audio")
+    selected,spread=consensus(results,threshold)
+    return selected,spread,results
+
+def envelope(x,hop=ENV_HOP):
+    """Onset envelope: positive difference of the log RMS.
+
+    The raw waveform of two language dubs only matches where music/effects
+    dominate. The plain log-RMS envelope is too smooth: over a wide search
+    range its slow loudness trends produce high scores at arbitrary offsets.
+    Differentiating it keeps only the shared onsets (music, effects, cuts),
+    which correlate at the true offset even in dialogue-heavy passages.
+    """
+    n=(len(x)//hop)*hop
+    if n==0: return np.zeros(0,dtype=np.float32)
+    rms=np.sqrt((x[:n].reshape(-1,hop).astype(np.float64)**2).mean(axis=1)+1e-12)
+    e=np.log(rms+1e-6).astype(np.float32)
+    return np.clip(np.diff(e,prepend=e[0]),-4,4)
+
+def analyze_envelope(a,b,total,max_offset,samples=5,window=CHUNK,
+                     threshold=ENV_THRESHOLD):
+    """Fallback correlation on the loudness envelope.
+
+    The waveform of two language dubs only matches where the mix is dominated
+    by shared music/effects. In dialogue-heavy passages the cross-correlation
+    peak disappears below the noise of a wide search range, so the waveform
+    pass finds too few agreeing positions. The envelope keeps the shared
+    music/effects timing and is far less sensitive to the different dialogue.
+    """
+    ea,eb=envelope(a),envelope(b)
+    rate=SR/ENV_HOP
+    if len(ea)==0 or len(eb)==0:
+        raise RuntimeError("Could not analyze audio")
+
+    results=[]
+    for pos in analysis_positions(total,samples,window):
+        aa=ea[int(pos*rate):int((pos+window)*rate)]
+        if len(aa) < window*rate*.8: continue
+        bs=max(0,int((pos-max_offset)*rate))
+        be=min(len(eb),int((pos+window+max_offset)*rate))
+        bb=eb[bs:be]
+        lag,score=best_lag(aa,bb,max_offset,rate=rate)
+        offset=(bs+lag)/rate-pos
+        results.append((float(offset),score,float(pos)))
+
+    if not results: raise RuntimeError("Could not analyze audio")
+    selected,spread=consensus(results,threshold)
     return selected,spread,results
 
 # --- Audiospuren: was wird kopiert, was encodiert --------------------------
@@ -414,7 +465,9 @@ def main():
                     help="Bitrate fuer mehr als zwei Kanaele (5.1), Standard 384k")
     ap.add_argument("--max-offset",type=float,default=180)
     ap.add_argument("--samples",type=int,default=5)
-    ap.add_argument("--threshold",type=float,default=.08)
+    ap.add_argument("--threshold",type=float,default=.08,
+                    help="minimum waveform correlation score (the envelope "
+                         "fallback uses its own fixed threshold)")
     ap.add_argument("--force",action="store_true",
                     help="continue despite failed video identity check")
     ap.add_argument("--dry-run",action="store_true")
@@ -455,13 +508,24 @@ def main():
         print("\nExtracting low-rate mono audio...",file=sys.stderr)
         extract_audio(args.reference,ar)
         extract_audio(args.second,br)
-        a,b=prep(np.fromfile(ar,dtype=np.float32)),prep(np.fromfile(br,dtype=np.float32))
+        a_raw,b_raw=(np.fromfile(ar,dtype=np.float32),
+                     np.fromfile(br,dtype=np.float32))
+        a,b=prep(a_raw.copy()),prep(b_raw.copy())
+        common=min(duration(ia),duration(ib))
 
-        offset,spread,results=analyze(
-            a,b,min(duration(ia),duration(ib)),
-            args.max_offset,args.samples,threshold=args.threshold)
+        try:
+            offset,spread,results=analyze(
+                a,b,common,args.max_offset,args.samples,
+                threshold=args.threshold)
+            method="waveform"
+        except RuntimeError as e:
+            print(f"\nWaveform correlation failed ({e}); retrying with the "
+                  f"loudness envelope...",file=sys.stderr)
+            offset,spread,results=analyze_envelope(
+                a_raw,b_raw,common,args.max_offset,args.samples)
+            method="envelope"
 
-        print("\nAudio correlation:",file=sys.stderr)
+        print(f"\nAudio correlation ({method}):",file=sys.stderr)
         for o,s,t in results:
             print(f"  {t:8.1f}s  offset={o:+.4f}s  score={s:.3f}",
                   file=sys.stderr)
