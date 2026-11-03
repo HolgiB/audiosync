@@ -136,10 +136,15 @@ def video_params(info):
 def frame_sig(path, timestamp, n=5):
     # Structural signature: average of n downscaled grayscale frames.
     # Tolerates different encodes of the same film; exact pixels need not match.
+    # The source frames may differ in aspect: one release can be cropped to the
+    # active picture, another letterboxed inside 16:9. Preserve the aspect and
+    # pad to 64x36 so both representations put the film into the same rows.
+    vf=("scale=64:36:force_original_aspect_ratio=decrease,"
+        "pad=64:36:(ow-iw)/2:(oh-ih)/2,format=gray")
     r = run(["ffmpeg","-hide_banner","-loglevel","error",
              "-ss",f"{timestamp:.3f}","-i",str(path),
              "-frames:v",str(n),
-             "-vf","scale=64:36,format=gray","-f","rawvideo","-"], True)
+             "-vf",vf,"-f","rawvideo","-"], True)
     arr = np.frombuffer(r.stdout, dtype=np.uint8).astype(np.float32)
     if arr.size == 0: return None
     return arr.reshape(-1,36,64).mean(axis=0)
@@ -360,6 +365,18 @@ LOSSLESS_CODECS = {
 }
 AAC_BITRATE_STEREO = "192k"   # gemessen: bei verlustfreier Quelle bringt 192k
 AAC_BITRATE_MULTI  = "384k"   # 2,1 dB gegenueber 160k; 5.1 braucht deutlich mehr
+AAC_ENCODER_DELAY  = 1024     # Samples Priming, die ein AAC-Encode voranstellt
+
+def aac_priming(stream):
+    """Priming-Zeit des AAC-Encoders fuer diese Quelle in Sekunden.
+
+    ffmpeg schreibt die 1024 Priming-Samples als ersten Packet mit negativem
+    PTS, aber der Matroska-Muxer/Decoder trimmt sie beim Abspielen nicht
+    zuverlaessig. Ohne Ausgleich waere jede encodierte Spur ~21 ms zu spaet.
+    """
+    try: sr=int((stream or {}).get("sample_rate") or 48000)
+    except (TypeError,ValueError): sr=48000
+    return AAC_ENCODER_DELAY/sr if sr>0 else 0.0
 
 def is_lossless(codec):
     c=str(codec or "").lower()
@@ -397,18 +414,31 @@ def audio_codec_args(ref_stream,second_stream,mode="auto",
         txt_ref=f"{codec(ref_stream) or '?'} -> kopiert (bitgenau)"
     br2=aac_bitrate(ch(second_stream),stereo,multi)
     args+=["-c:a:1","aac","-b:a:1",br2]
-    return args,txt_ref,f"{codec(second_stream) or '?'} -> AAC {br2}"
+    return args,txt_ref,f"{codec(second_stream) or '?'} -> AAC {br2}",ref_enc
 
 def mux(reference,second,out,offset,ref_lang,second_lang,
-        ref_title,second_title,force,ref_is_default=True,audio_args=None):
+        ref_title,second_title,force,ref_is_default=True,audio_args=None,
+        ref_encode=False,ref_prime=0.0,second_prime=0.0):
     # Filter the SECOND audio only. Sign convention: offset is the position of
     # the second recording's content relative to the reference (second - ref).
     # Positive => second content is later => advance it (trim leading audio).
     # Negative => second content is earlier => delay it.
-    if offset >= 0:
-        filt=f"atrim=start={offset:.6f},asetpts=PTS-STARTPTS"
+    # shift cancels the AAC encoder priming so the encoded content lands at the
+    # intended time instead of ~21 ms late.
+    shift=offset+second_prime
+    if shift >= 0:
+        filt=f"atrim=start={shift:.6f},asetpts=PTS-STARTPTS"
     else:
-        filt=f"adelay={-offset*1000:.3f}:all=1,asetpts=PTS-STARTPTS"
+        filt=f"adelay={-shift*1000:.3f}:all=1,asetpts=PTS-STARTPTS"
+
+    filters=[]
+    if ref_encode:
+        filters.append(f"[0:a:0]atrim=start={ref_prime:.6f},"
+                       f"asetpts=PTS-STARTPTS[ref]")
+        ref_map="[ref]"
+    else:
+        ref_map="0:a:0"
+    filters.append(f"[1:a:0]{filt}[en]")
 
     if ref_is_default:
         disp=["-disposition:a:0","default","-disposition:a:1","0"]
@@ -416,10 +446,14 @@ def mux(reference,second,out,offset,ref_lang,second_lang,
         disp=["-disposition:a:0","0","-disposition:a:1","default"]
     cmd=["ffmpeg","-hide_banner","-y" if force else "-n",
          "-i",reference,"-i",second,
-         "-map","0:v:0","-map","0:a:0","-map","[en]",
+         "-map","0:v:0","-map",ref_map,"-map","[en]",
          "-map","0:s?","-map","1:s?",
-         "-filter_complex",f"[1:a:0]{filt}[en]",
+         "-filter_complex",";".join(filters),
          "-map_metadata","0","-map_chapters","0",
+         # Streng nach DTS verschachteln. Ohne das liegen die Audiopakete in
+         # Matroska zu weit auseinander; MPlayer/SMPlayer melden "bad
+         # interleaving" und geben beim Umschalten keinen Ton aus.
+         "-max_interleave_delta","0",
          "-c:v","copy",
          # Audio: siehe audio_codec_args() - Referenz kopieren oder encodieren,
          # zweite Spur immer encodieren (Versatzfilter).
@@ -491,7 +525,7 @@ def main():
     if not get_stream(ia,"audio") or not get_stream(ib,"audio"):
         die("both inputs need at least one audio stream")
 
-    audio_args,txt_ref,txt_second=audio_codec_args(
+    audio_args,txt_ref,txt_second,ref_encode=audio_codec_args(
         get_stream(ia,"audio"),get_stream(ib,"audio"),args.audio,
         args.aac_bitrate_stereo,args.aac_bitrate_multi)
     print(f"\nAudio ({args.audio}): Referenz {txt_ref} | zweite {txt_second}",
@@ -544,7 +578,10 @@ def main():
             args.ref_lang,args.second_lang,args.ref_title,args.second_title,
             args.force,
             ref_is_default_flag(args.default_lang,args.ref_lang,args.second_lang),
-            audio_args)
+            audio_args,
+            ref_encode=ref_encode,
+            ref_prime=aac_priming(get_stream(ia,"audio")),
+            second_prime=aac_priming(get_stream(ib,"audio")))
         print(f"Done: {args.output}",file=sys.stderr)
 
 if __name__=="__main__":

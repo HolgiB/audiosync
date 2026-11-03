@@ -32,34 +32,34 @@ language tags automatically):
    structural signatures at several positions. Recordings of the same release
    can start at slightly different times (different channel padding), so a
    constant video offset is first estimated and applied before comparing. The
+   signature preserves the source aspect ratio and pads to a common canvas, so
+   a cropped transfer and a letterboxed 16:9 transfer of the same film compare
+   correctly instead of failing on the differing frame geometry. The offset
    estimate is refined to sub-grid resolution (0.05 s), because the signature
    window is only a few frames wide and coarse seeking can otherwise push
    genuine matches below the similarity threshold.
 3. Extracts both first audio tracks as low-rate mono PCM solely for analysis.
 4. Determines the relative audio offset at several positions throughout the
-   movie (default 5) by cross-correlating the raw waveform.
-5. If the waveform pass finds too few agreeing positions — typical for
-   dialogue-heavy material such as **two separate captures of the same episode**
-   (Audials/Netflix in two language runs), where the mix carries little shared
-   music — it automatically retries on the **onset envelope**: the positive
-   difference of the log RMS at 2 ms resolution. The envelope keeps the shared
-   onsets (music, effects, cuts) and is far less sensitive to the different
-   dialogue, so it still finds the offset. A plain log-RMS envelope is not used
-   on purpose — it is too smooth and scores arbitrary offsets; differentiating
-   it leaves only the shared onsets. The retried method is printed as
-   `Audio correlation (waveform)` or `Audio correlation (envelope)`.
-6. Keeps the largest cluster of measurements that agree within 150 ms — an
+   movie (default 5) by waveform cross-correlation. If the two language dubs
+   share too little raw waveform (dialogue-heavy passages), the waveform pass
+   cannot find enough reliable positions; the tool then retries on a
+   differentiated log-RMS onset envelope. Music and effects keep their timing
+   across dubs, so their onsets still align even where the speech does not.
+5. Keeps the largest cluster of measurements that agree within 150 ms — an
    isolated outlier (quiet scene, a repeated music cue) whose score is still
    just above the threshold is dropped — uses the median of that cluster, and
    rejects the pair when the cluster itself still spreads by more than 150 ms.
    A genuine speed difference or a different cut shows up as a consistent
    trend across positions, not as an isolated point, so it still fails.
-7. Positive offset: trims the leading audio of the second recording with
+6. Positive offset: trims the leading audio of the second recording with
    `atrim` and resets its PTS with `asetpts=PTS-STARTPTS`.
-8. Negative offset: delays the second recording's audio with `adelay` and
+7. Negative offset: delays the second recording's audio with `adelay` and
    resets its PTS with `asetpts=PTS-STARTPTS`.
-9. Muxes the reference video + both audio tracks + the subtitle tracks of both
-   inputs into the final MKV.
+8. Muxes the reference video + both audio tracks + the subtitle tracks of both
+   inputs into the final MKV. Packets are interleaved strictly by DTS
+   (`-max_interleave_delta 0`); with FFmpeg's default interleaving, files with
+   two audio tracks can trigger "possibly bad interleaving" in
+   MPlayer/SMPlayer, which then produces no sound when switching tracks.
 
 ## Parameters
 
@@ -101,8 +101,9 @@ language tags automatically):
         --max-offset       maximum search window in seconds for the audio
                            correlation (default: 180)
         --samples          number of audio analysis positions (default: 5)
-        --threshold        minimum normalized correlation score for an audio
-                           measurement to be accepted (default: 0.08)
+        --threshold        minimum normalized correlation score for a waveform
+                           measurement to be accepted (default: 0.08). The
+                           envelope fallback uses its own fixed threshold.
         --force            continue despite a failed video identity check
         --dry-run          run all checks and analysis, but write no output
 
@@ -178,6 +179,12 @@ Which track is copied and which is encoded follows `--audio`:
 - **Second track:** always encoded. It runs through the offset filter
   (`adelay`/`atrim`), and a filtered stream cannot be stream-copied.
 
+The AAC encoder prepends 1024 samples of priming (21.3 ms at 48 kHz). FFmpeg's
+Matroska path does not reliably trim them on playback, so every encoded track
+would otherwise land ~21 ms late. The mux step compensates this before applying
+the measured offset, for both an encoded reference track and the always-encoded
+second track.
+
 Bitrates are channel-aware: **192k** up to two channels, **384k** for more (5.1).
 The stereo figure is not valid for six channels — encoding 5.1 at a stereo rate,
 or down to stereo, would be a second downmix rather than a transcode.
@@ -238,14 +245,6 @@ The tool deliberately aborts when the offset changes substantially during the
 movie. That usually indicates different cuts, PAL/NTSC speed differences,
 extra/missing scenes, or a bad correlation.
 
-**Video offset and audio offset are not the same number.** The video identity
-step also reports an estimated video offset, but that is only a cross-check for
-the picture. Two separate captures of the same stream can carry different
-internal A/V delays, so the two can differ noticeably — measured on three
-episodes of one season: video +0.00 / +1.05 / +0.20 s against audio +0.064 /
-+1.0595 / +0.220 s. The audio-derived value is the one that aligns the tracks;
-never substitute the video offset for it.
-
 ## Common pitfalls
 
 **AVI/Xvid sources break the MKV mux.** An AVI whose video has no timestamps
@@ -262,11 +261,6 @@ re-encoding) and use the remux as input:
 
     audio offset is unstable (>150 ms spread)
         the video matches but the audio timing does not (different dub or mix)
-
-    No reliable synchronization point found
-        both passes failed: the waveform pass and the onset-envelope fallback
-        each found too few agreeing positions. Typical for two independent
-        captures whose audio really is a different mix — not a sync bug.
 
     CalledProcessError from ffmpeg inside mux()
         container/timestamp issue, the analysis itself was fine (see AVI above)
