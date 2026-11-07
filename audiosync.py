@@ -28,7 +28,8 @@ CHUNK = 30.0
 REFINE_WIN = 0.5
 REFINE_STEP = 0.05
 CONSENSUS_TOL = 0.15
-ENV_HOP = 4              # samples at SR -> 2 ms envelope resolution
+ENV_HOP = int(0.02*SR)   # onset envelope: 20-ms frame
+ENV_SR = SR / ENV_HOP    # 50 Hz
 ENV_THRESHOLD = 0.08
 
 # Sprachen: (ISO 639-1 zweistellig, ISO 639-2/B dreistellig, lesbarer Titel).
@@ -244,10 +245,24 @@ def prep(x):
     y=np.diff(x,prepend=x[0])
     return np.clip(y,-4,4)
 
-def best_lag(ref, other, max_seconds, rate=SR):
+def envelope(x):
+    """Differentiated log-RMS onset envelope.
+
+    Different-language dubs share almost no raw waveform (the speech differs),
+    but music and effects keep their timing. Their onsets therefore still line
+    up on an energy envelope, which is sampled at ENV_SR (50 Hz)."""
+    n=len(x)//ENV_HOP
+    if n==0: return np.zeros(0,dtype=np.float32)
+    r=np.log1p(np.sqrt(np.mean(x[:n*ENV_HOP].reshape(n,ENV_HOP)**2,axis=1)+1e-12))
+    r-=r.mean()
+    d=np.diff(r,prepend=r[0])
+    d=np.clip(d,-4,4)
+    return d/np.sqrt(np.mean(d*d)+1e-12)
+
+def best_lag(ref, other, max_seconds, sr=SR):
     """Return signed shift of other relative to ref; positive means later."""
     n=len(ref)
-    maxs=int(max_seconds*rate)
+    maxs=int(max_seconds*sr)
     # Correlate ref with the whole second recording.
     m=len(other)
     size=1 << (n+m-1).bit_length()
@@ -266,19 +281,32 @@ def best_lag(ref, other, max_seconds, rate=SR):
                 (np.linalg.norm(ref[:ln])*np.linalg.norm(aligned[:ln])+1e-12))
     return lag,score
 
-def analysis_positions(total,samples,window=CHUNK):
+def scan_positions(total,samples,window=CHUNK):
+    # Windows are positioned identically in reference time; second recording
+    # is searched around each position.
     if total < window+10:
         return [max(0,total/2-window/2)]
     lo=min(60.0,total*.10)
     hi=max(lo,total-60.0-window)
     return np.linspace(lo,hi,samples)
 
+def measure(a,b,total,max_offset,samples,window,threshold,sr):
+    results=[]
+    for pos in scan_positions(total,samples,window):
+        aa=a[int(pos*sr):int((pos+window)*sr)]
+        if len(aa) < window*sr*.8: continue
+        bs=max(0,int((pos-max_offset)*sr))
+        be=min(len(b),int((pos+window+max_offset)*sr))
+        lag,score=best_lag(aa,b[bs:be],max_offset,sr)
+        # Convert lag relative to bb start to absolute second-vs-reference shift.
+        offset=(bs+lag)/sr-pos
+        results.append((float(offset),score,float(pos)))
+    return results
+
 def consensus(results,threshold):
-    """Largest agreeing cluster of measurements and its spread."""
     good=[r[0] for r in results if r[1] >= threshold]
     if not good:
-        raise RuntimeError("No reliable synchronization point found")
-
+        return None
     # A single position can yield a spurious correlation peak (quiet scene,
     # repeated music cue) whose score is still just above the threshold. Such
     # an isolated outlier would blow up the max-min spread and abort an
@@ -289,74 +317,27 @@ def consensus(results,threshold):
     cluster=max(([o for o in good if abs(o-c) <= CONSENSUS_TOL] for c in good),
                 key=len)
     if len(cluster) < max(2, math.ceil(len(good)/2)):
-        raise RuntimeError("No reliable synchronization point found")
-    selected=float(np.median(cluster))
-    spread=float(max(cluster)-min(cluster))
-    return selected,spread
+        return None
+    return float(np.median(cluster)), float(max(cluster)-min(cluster))
 
 def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
-    # Windows are positioned identically in reference time; second recording
-    # is searched around each position.
-    results=[]
-    for pos in analysis_positions(total,samples,window):
-        aa=a[int(pos*SR):int((pos+window)*SR)]
-        if len(aa) < window*SR*.8: continue
-        bs=max(0,int((pos-max_offset)*SR))
-        be=min(len(b),int((pos+window+max_offset)*SR))
-        bb=b[bs:be]
-        lag,score=best_lag(aa,bb,max_offset)
-        # Convert lag relative to bb start to absolute second-vs-reference shift.
-        offset=(bs+lag)/SR-pos
-        results.append((float(offset),score,float(pos)))
-
-    if not results: raise RuntimeError("Could not analyze audio")
-    selected,spread=consensus(results,threshold)
-    return selected,spread,results
-
-def envelope(x,hop=ENV_HOP):
-    """Onset envelope: positive difference of the log RMS.
-
-    The raw waveform of two language dubs only matches where music/effects
-    dominate. The plain log-RMS envelope is too smooth: over a wide search
-    range its slow loudness trends produce high scores at arbitrary offsets.
-    Differentiating it keeps only the shared onsets (music, effects, cuts),
-    which correlate at the true offset even in dialogue-heavy passages.
-    """
-    n=(len(x)//hop)*hop
-    if n==0: return np.zeros(0,dtype=np.float32)
-    rms=np.sqrt((x[:n].reshape(-1,hop).astype(np.float64)**2).mean(axis=1)+1e-12)
-    e=np.log(rms+1e-6).astype(np.float32)
-    return np.clip(np.diff(e,prepend=e[0]),-4,4)
-
-def analyze_envelope(a,b,total,max_offset,samples=5,window=CHUNK,
-                     threshold=ENV_THRESHOLD):
-    """Fallback correlation on the loudness envelope.
-
-    The waveform of two language dubs only matches where the mix is dominated
-    by shared music/effects. In dialogue-heavy passages the cross-correlation
-    peak disappears below the noise of a wide search range, so the waveform
-    pass finds too few agreeing positions. The envelope keeps the shared
-    music/effects timing and is far less sensitive to the different dialogue.
-    """
-    ea,eb=envelope(a),envelope(b)
-    rate=SR/ENV_HOP
-    if len(ea)==0 or len(eb)==0:
-        raise RuntimeError("Could not analyze audio")
-
-    results=[]
-    for pos in analysis_positions(total,samples,window):
-        aa=ea[int(pos*rate):int((pos+window)*rate)]
-        if len(aa) < window*rate*.8: continue
-        bs=max(0,int((pos-max_offset)*rate))
-        be=min(len(eb),int((pos+window+max_offset)*rate))
-        bb=eb[bs:be]
-        lag,score=best_lag(aa,bb,max_offset,rate=rate)
-        offset=(bs+lag)/rate-pos
-        results.append((float(offset),score,float(pos)))
-
-    if not results: raise RuntimeError("Could not analyze audio")
-    selected,spread=consensus(results,threshold)
-    return selected,spread,results
+    # a,b are raw mono signals at SR. Try the raw waveform first (exact for
+    # same-language material). Different dubs share too little waveform in
+    # dialogue-heavy passages, so retry on the onset envelope when the
+    # waveform pass cannot find a stable cluster.
+    results=measure(prep(a),prep(b),total,max_offset,samples,window,
+                    threshold,SR)
+    selected=consensus(results,threshold)
+    method="waveform"
+    if selected is None:
+        results=measure(envelope(a),envelope(b),total,max_offset,samples,
+                        window,ENV_THRESHOLD,ENV_SR)
+        selected=consensus(results,ENV_THRESHOLD)
+        method="onset envelope"
+    if selected is None:
+        raise RuntimeError("No reliable synchronization point found")
+    selected,spread=selected
+    return selected,spread,results,method
 
 # --- Audiospuren: was wird kopiert, was encodiert --------------------------
 LOSSLESS_CODECS = {
@@ -547,7 +528,6 @@ def main():
         extract_audio(args.second,br)
         a_raw,b_raw=(np.fromfile(ar,dtype=np.float32),
                      np.fromfile(br,dtype=np.float32))
-        a,b=prep(a_raw.copy()),prep(b_raw.copy())
         common=min(duration(ia),duration(ib))
 
         if args.offset is not None:
@@ -555,17 +535,12 @@ def main():
             print(f"\nManueller Versatz: {offset:+.4f}s (Korrelation uebersprungen)",
                   file=sys.stderr)
         else:
-            try:
-                offset,spread,results=analyze(
-                    a,b,common,args.max_offset,args.samples,
-                    threshold=args.threshold)
-                method="waveform"
-            except RuntimeError as e:
-                print(f"\nWaveform correlation failed ({e}); retrying with the "
-                      f"loudness envelope...",file=sys.stderr)
-                offset,spread,results=analyze_envelope(
-                    a_raw,b_raw,common,args.max_offset,args.samples)
-                method="envelope"
+            # analyze() misst erst die rohe Wellenform und faellt bei zu wenig
+            # Treffern selbst auf die Onset-Huellkurve zurueck (andere Synchros
+            # teilen kaum Wellenform). Rueckgabe: offset, spread, results, method.
+            offset,spread,results,method=analyze(
+                a_raw,b_raw,common,args.max_offset,args.samples,
+                threshold=args.threshold)
 
         print(f"\nAudio correlation ({method}):",file=sys.stderr)
         for o,s,t in results:
