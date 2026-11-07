@@ -104,6 +104,11 @@ language tags automatically):
         --threshold        minimum normalized correlation score for a waveform
                            measurement to be accepted (default: 0.08). The
                            envelope fallback uses its own fixed threshold.
+        --offset           manual offset in seconds (second - reference); skips
+                           the audio correlation and the spread check. Use it
+                           when both mixes share no usable signal (different
+                           dubs/masters) but the offset is known — measure it
+                           on the decoded frames, not by guessing.
         --force            continue despite a failed video identity check
         --dry-run          run all checks and analysis, but write no output
 
@@ -231,6 +236,21 @@ Only use this if you have independently verified that the releases are the
 same:
 
     ./audiosync.py film-de.mkv film-en.mkv -o film.mkv --force
+
+## Manual offset when the audio correlation fails
+
+Separate dubs/masters sometimes share almost no waveform, and then both the
+waveform and the envelope fallback end with `No reliable synchronization point
+found`, even though the picture is identical. Measure the offset on the decoded
+frames and pass it with `--offset`:
+
+    # reference t matches second t+4.70 over the whole film -> offset = +4.70
+    ./audiosync.py film-de.mkv film-en.mkv -o film.mkv --offset 4.70
+
+How to measure: sample eight positions across the film, decode a 64×36 grey
+frame from the reference at `t` and scan ±9 s in the second at 25 fps, keep the
+lag with the highest correlation. Consistent lag = one constant offset; drifting
+lag = different cuts and no merge.
 
 ## Offset meaning
 

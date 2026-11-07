@@ -504,6 +504,9 @@ def main():
                          "fallback uses its own fixed threshold)")
     ap.add_argument("--force",action="store_true",
                     help="continue despite failed video identity check")
+    ap.add_argument("--offset",type=float,default=None,
+                    help="manueller Versatz in Sekunden (second - reference); "
+                         "ueberspringt die Audio-Korrelation")
     ap.add_argument("--dry-run",action="store_true")
     args=ap.parse_args()
 
@@ -547,17 +550,22 @@ def main():
         a,b=prep(a_raw.copy()),prep(b_raw.copy())
         common=min(duration(ia),duration(ib))
 
-        try:
-            offset,spread,results=analyze(
-                a,b,common,args.max_offset,args.samples,
-                threshold=args.threshold)
-            method="waveform"
-        except RuntimeError as e:
-            print(f"\nWaveform correlation failed ({e}); retrying with the "
-                  f"loudness envelope...",file=sys.stderr)
-            offset,spread,results=analyze_envelope(
-                a_raw,b_raw,common,args.max_offset,args.samples)
-            method="envelope"
+        if args.offset is not None:
+            offset=args.offset; spread=0.0; results=[]; method="manuell"
+            print(f"\nManueller Versatz: {offset:+.4f}s (Korrelation uebersprungen)",
+                  file=sys.stderr)
+        else:
+            try:
+                offset,spread,results=analyze(
+                    a,b,common,args.max_offset,args.samples,
+                    threshold=args.threshold)
+                method="waveform"
+            except RuntimeError as e:
+                print(f"\nWaveform correlation failed ({e}); retrying with the "
+                      f"loudness envelope...",file=sys.stderr)
+                offset,spread,results=analyze_envelope(
+                    a_raw,b_raw,common,args.max_offset,args.samples)
+                method="envelope"
 
         print(f"\nAudio correlation ({method}):",file=sys.stderr)
         for o,s,t in results:
