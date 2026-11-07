@@ -31,6 +31,8 @@ CONSENSUS_TOL = 0.15
 ENV_HOP = int(0.02*SR)   # onset envelope: 20-ms frame
 ENV_SR = SR / ENV_HOP    # 50 Hz
 ENV_THRESHOLD = 0.08
+LOUD_RATE = 10.0         # loudness profile: 100-ms frame, 1-s smoothing
+LOUD_THRESHOLD = 0.50    # profile scores are much higher than onset scores
 
 # Sprachen: (ISO 639-1 zweistellig, ISO 639-2/B dreistellig, lesbarer Titel).
 # Die B-Formen (ger, fre, dut ...) sind die in Matroska/ffmpeg ueblichen; die
@@ -303,7 +305,7 @@ def measure(a,b,total,max_offset,samples,window,threshold,sr):
         results.append((float(offset),score,float(pos)))
     return results
 
-def consensus(results,threshold):
+def consensus(results,threshold,tol=CONSENSUS_TOL):
     good=[r[0] for r in results if r[1] >= threshold]
     if not good:
         return None
@@ -311,20 +313,92 @@ def consensus(results,threshold):
     # repeated music cue) whose score is still just above the threshold. Such
     # an isolated outlier would blow up the max-min spread and abort an
     # otherwise perfectly synchronized pair. Keep the largest cluster of
-    # measurements that agree within CONSENSUS_TOL; a genuine speed difference
+    # measurements that agree within tol; a genuine speed difference
     # or different cut shows up as a consistent trend across positions, not as
     # an isolated point, so it still fails the spread check in main().
-    cluster=max(([o for o in good if abs(o-c) <= CONSENSUS_TOL] for c in good),
+    cluster=max(([o for o in good if abs(o-c) <= tol] for c in good),
                 key=len)
     if len(cluster) < max(2, math.ceil(len(good)/2)):
         return None
     return float(np.median(cluster)), float(max(cluster)-min(cluster))
 
+def loudness(x,rate=LOUD_RATE,smooth=1.0):
+    """Geglaettetes Log-RMS-Profil (dB) als grobe Lautheitskurve.
+
+    Die Onset-Huellkurve versagt, wenn beide Synchros stark komprimiert sind:
+    die Differenz der Log-RMS ist dann in beiden Spuren Rauschen. Das
+    geglaettete Profil ueber eine Sekunde ist robust - es folgt Musik,
+    Effekten und Sprechdichte. Gemessen an zwei Filmen mit nicht korrelierbarer
+    Wellenform: Score 0,97-0,98 beim richtigen Versatz.
+    """
+    hop=int(SR/rate)
+    if hop<1: hop=1
+    n=len(x)//hop
+    if n==0: return np.zeros(0,dtype=np.float32)
+    rms=np.sqrt((x[:n*hop].reshape(n,hop).astype(np.float64)**2).mean(axis=1)+1e-12)
+    e=20*np.log10(rms+1e-9)
+    k=max(1,int(rate*smooth))
+    if k>1: e=np.convolve(e,np.ones(k)/k,mode="same")
+    e-=e.mean()
+    return e.astype(np.float32)
+
+def refine_offset(ea,eb,coarse,rate,total,samples=8,window=60.0,spread=1.5):
+    """Feinmessung auf der Onset-Huellkurve um einen groben Versatz.
+
+    Das Lautheitsprofil liefert nur ~0,1 s; fuer Lippensynchronitaet wird mit
+    der feineren Huellkurve in einem Fenster um den groben Wert nachgemessen.
+    """
+    if len(ea)==0 or len(eb)==0: return None
+    out=[]
+    for pos in scan_positions(total,samples,window):
+        n=int(window*rate); a0=int(pos*rate)
+        aa=ea[a0:a0+n]
+        if len(aa)<n*.8: continue
+        b0=max(0,int((pos+coarse-spread)*rate))
+        bb=eb[b0:int((pos+coarse+window+spread)*rate)]
+        if len(bb)<len(aa): continue
+        base=a0-b0; best=(-9.0,0.0)
+        for d in range(-int(spread*rate),int(spread*rate)+1):
+            s=base+d
+            if s<0 or s+len(aa)>len(bb): continue
+            y=bb[s:s+len(aa)]
+            c=float((aa@y)/(np.linalg.norm(aa)*np.linalg.norm(y)+1e-9))
+            if c>best[0]: best=(c,d/rate)
+        out.append((coarse+best[1],best[0],float(pos)))
+    good=[r[0] for r in out if r[1]>=0.15]
+    if len(good)<max(2,math.ceil(len(out)/3)): return None
+    return float(np.median(good)), float(max(good)-min(good)), out
+
+def global_lag(pa,pb,max_offset,rate):
+    """Versatz ueber die GANZE Lautheitskurve (FFT-Kreuzkorrelation).
+
+    Fensterweise Messungen auf dem Profil sind zu schwach (30-s-Fenster:
+    Scores 0,05-0,2); ueber den ganzen Film liegt der richtige Versatz bei
+    0,97-0,99, weil Musik, Effekte und Sprechdichte gemeinsam passen.
+    Rueckgabe: (Versatz in s mit Vorzeichen second-reference, Score).
+    """
+    n,m=len(pa),len(pb)
+    if n==0 or m==0: return None
+    size=1<<(n+m-1).bit_length()
+    c=np.fft.irfft(np.conj(np.fft.rfft(pa,size))*np.fft.rfft(pb,size),size)
+    maxk=int(max_offset*rate)
+    lags=np.arange(-maxk,maxk+1)
+    vals=c[lags%size]
+    cs=np.concatenate(([0.0],np.cumsum(pb.astype(np.float64)**2)))
+    i1=lags+n
+    ok=(lags>=0)&(i1<=m)
+    if not ok.any(): return None
+    nrm=np.sqrt(cs[i1[ok]]-cs[lags[ok]])*np.linalg.norm(pa)
+    sc=vals[ok]/np.maximum(nrm,1e-9)
+    best=int(np.argmax(sc))
+    return float(lags[ok][best])/rate, float(sc[best])
+
 def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
     # a,b are raw mono signals at SR. Try the raw waveform first (exact for
     # same-language material). Different dubs share too little waveform in
     # dialogue-heavy passages, so retry on the onset envelope when the
-    # waveform pass cannot find a stable cluster.
+    # waveform pass cannot find a stable cluster; if even the onsets are
+    # buried in compression noise, fall back to the smooth loudness profile.
     results=measure(prep(a),prep(b),total,max_offset,samples,window,
                     threshold,SR)
     selected=consensus(results,threshold)
@@ -334,6 +408,23 @@ def analyze(a,b,total,max_offset,samples=5,window=CHUNK,threshold=0.08):
                         window,ENV_THRESHOLD,ENV_SR)
         selected=consensus(results,ENV_THRESHOLD)
         method="onset envelope"
+    if selected is None:
+        g=global_lag(loudness(a),loudness(b),max_offset,LOUD_RATE)
+        if g is not None and g[1]>=LOUD_THRESHOLD:
+            coarse=g[0]
+            results=measure(loudness(a),loudness(b),total,max_offset,
+                            max(3,samples),1200.0,LOUD_THRESHOLD,LOUD_RATE)
+            selected=(coarse,0.0)
+            method=f"loudness profile (score {g[1]:.3f})"
+            fine=refine_offset(envelope(a),envelope(b),coarse,ENV_SR,total)
+            # Der Feinpass ist nur so gut wie seine Fenster: bei stark
+            # komprimierten Synchros liefert er Scores unter 0,2 und biegt
+            # den guten groben Wert um Zehntel weg. Nur uebernehmen, wenn er
+            # dem groben Versatz zustimmt.
+            if fine is not None and abs(fine[0]-coarse)<=0.15:
+                selected=(fine[0],fine[1])
+                results=fine[2]
+                method=f"loudness profile (score {g[1]:.3f}) + onset refine"
     if selected is None:
         raise RuntimeError("No reliable synchronization point found")
     selected,spread=selected
