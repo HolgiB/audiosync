@@ -239,18 +239,27 @@ same:
 
 ## Manual offset when the audio correlation fails
 
-Separate dubs/masters sometimes share almost no waveform, and then both the
-waveform and the envelope fallback end with `No reliable synchronization point
-found`, even though the picture is identical. Measure the offset on the decoded
-frames and pass it with `--offset`:
+Separate dubs/masters sometimes share almost no waveform, and then even the
+envelope fallback can end with `No reliable synchronization point found`.
+Measure the offset **on the audio, never on the picture** — the two streams of a
+capture can carry heads of different lengths. Measured case: picture aligned at
++4.70 s while the audio needed −5.28 s, i.e. the English capture's audio led its
+own video by ~10 s.
 
-    # reference t matches second t+4.70 over the whole film -> offset = +4.70
-    ./audiosync.py film-de.mkv film-en.mkv -o film.mkv --offset 4.70
+    # second audio leads by 5.284 s -> offset = -5.2842
+    ./audiosync.py film-de.mkv film-en.mkv -o film.mkv --offset -5.2842
 
-How to measure: sample eight positions across the film, decode a 64×36 grey
-frame from the reference at `t` and scan ±9 s in the second at 25 fps, keep the
-lag with the highest correlation. Consistent lag = one constant offset; drifting
-lag = different cuts and no merge.
+Measurement: read both first audio tracks as 2 kHz mono, build the log-RMS onset
+envelope (positive first difference, 20 ms hop) and scan ±15 s in 20 ms steps
+over 5–8 windows spread across the film. Take the lag that wins at most
+positions; a spread above ~50 ms means different cuts.
+
+Calibrate the sign once with a synthetic pair: delay one track by a known 3.0 s
+(`-af adelay=3000:all=1`) and check which sign the scan reports.
+
+Always verify the finished file against itself: the two tracks must peak at
+lag 0 (measured: 0.00 s at five positions). The picture offset is a cross-check
+only — it answers "same cut", not "same timing".
 
 ## Offset meaning
 
