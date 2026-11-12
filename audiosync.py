@@ -176,47 +176,58 @@ def verify_video_identity(a,b,ia,ib,samples=4,max_offset=180.0):
         return False
 
     positions = np.linspace(common*.15, common*.85, samples)
+    sigs_a = [frame_sig(a,float(t)) for t in positions]
+    valid = [i for i,s in enumerate(sigs_a) if s is not None]
+    if not valid:
+        print("  RESULT: FAIL (no position aligns at any offset)",
+              file=sys.stderr)
+        return False
 
     # Recordings of the same release can start at slightly different times
     # (different leading padding on the channel), so the video streams may be
     # offset by a constant amount. Estimate that offset before comparing.
-    # Fine search first; escalate to a coarse wide sweep only if needed.
-    def best_alignment(t):
-        for rng, step in ((3.0,0.25),(max_offset,2.0)):
-            sa = frame_sig(a,float(t))
-            if sa is None: return None
-            bd,bc = 0.0,0.0
-            for dt in np.arange(-rng,rng+step,step):
-                sb = frame_sig(b,float(t+dt))
-                c = corr(sa,sb) if sb is not None else 0.0
-                if c > bc: bd,bc = dt,c
-            if bc >= 0.85:
-                # Refine to sub-grid resolution. The frame-signature average is
-                # only ~5 frames wide and -ss keyframe seeking adds jitter near
-                # GOP boundaries, so a coarse grid can quantize the peak by a
-                # tenth of a second and push genuine matches below threshold.
-                bb,cc = bd,bc
-                for dt in np.arange(bd-REFINE_WIN,bd+REFINE_WIN+REFINE_STEP,
-                                    REFINE_STEP):
-                    sb = frame_sig(b,float(t+dt))
-                    c = corr(sa,sb) if sb is not None else 0.0
-                    if c > cc: bb,cc = dt,c
-                return bb,cc
-        return None
+    #
+    # Score a candidate offset by the MEAN correlation over all positions, not
+    # by each position's own maximum. The per-position max used to lock onto a
+    # spurious peak in one scene (a bright/dark frame that resembles another
+    # shot) and then miss the real constant offset entirely, failing a valid
+    # pair. A real offset is supported by every position, so it wins the mean.
+    def mean_score(dt):
+        vals = []
+        for i in valid:
+            sb = frame_sig(b,float(positions[i]+dt))
+            if sb is not None:
+                vals.append(corr(sigs_a[i],sb))
+        return sum(vals)/len(vals) if vals else 0.0
 
-    aligned = [r for r in (best_alignment(float(t)) for t in positions)
-               if r is not None]
-    if not aligned:
-        print("  RESULT: FAIL (no position aligns at any offset)",
-              file=sys.stderr)
-        return False
-    offset = float(np.median([d for d,_ in aligned]))
+    def best_in(lo,hi,step):
+        bb,bc = lo,-1.0
+        for dt in np.arange(lo,hi+step/2,step):
+            c = mean_score(dt)
+            if c > bc: bb,bc = float(dt),c
+        return bb,bc
+
+    # Fine search first for the usual case of small channel-padding differences.
+    # Only trust it when the peak is unambiguous; otherwise escalate to the wide
+    # sweep and always refine there (the true offset can fall between 2-s grid
+    # points: a -7.5-s shift only offers -8 and -6).
+    bd,bc = best_in(-3.0,3.0,0.25)
+    if bc >= 0.95:
+        bd,bc = best_in(bd-REFINE_WIN,bd+REFINE_WIN,REFINE_STEP)
+    else:
+        wd,wc = best_in(-max_offset,max_offset,2.0)
+        if wc <= 0.0:
+            print("  RESULT: FAIL (no position aligns at any offset)",
+                  file=sys.stderr)
+            return False
+        bd,bc = best_in(wd-1.0,wd+1.0,REFINE_STEP)
+    offset = float(bd)
     print(f"  estimated video offset (second-ref): {offset:+.2f}s",
           file=sys.stderr)
 
     matches = 0
-    for t in positions:
-        sa = frame_sig(a,float(t))
+    for i,t in enumerate(positions):
+        sa = sigs_a[i]
         if sa is None: continue
         bc = 0.0
         for dt in np.arange(offset-REFINE_WIN,offset+REFINE_WIN+REFINE_STEP,

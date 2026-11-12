@@ -34,10 +34,13 @@ language tags automatically):
    constant video offset is first estimated and applied before comparing. The
    signature preserves the source aspect ratio and pads to a common canvas, so
    a cropped transfer and a letterboxed 16:9 transfer of the same film compare
-   correctly instead of failing on the differing frame geometry. The offset
-   estimate is refined to sub-grid resolution (0.05 s), because the signature
-   window is only a few frames wide and coarse seeking can otherwise push
-   genuine matches below the similarity threshold.
+   correctly instead of failing on the differing frame geometry. Each candidate
+   offset is scored by the *mean* similarity over all sample positions, so a
+   single scene that happens to resemble another shot (a bright or dark frame)
+   cannot drag the estimate to a wrong offset. The offset estimate is refined to
+   sub-grid resolution (0.05 s), because the signature window is only a few
+   frames wide and coarse seeking can otherwise push genuine matches below the
+   similarity threshold.
 3. Extracts both first audio tracks as low-rate mono PCM solely for analysis.
 4. Determines the relative audio offset at several positions throughout the
    movie (default 5) by waveform cross-correlation. If the two language dubs
